@@ -1,462 +1,383 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { ScanConfiguration, PaperSize, DPI } from './modules/ScannerConfig';
-import { extractPiecesWithOptions, loadImageFromFile, getImageDataFromImage, rotateImageData90 } from './modules/PieceExtractor';
-import { Piece, ScaledPiece, scaleAllPieces, calculateGlobalFactors, calculateLastLengthMM } from './modules/ProportionalScaler';
-import { autoNest, NestingResult } from './modules/AutoNester';
-import { exportToDXF, exportToPDF, downloadFile } from './modules/Exporter';
-
-type Screen = 'upload' | 'detect' | 'result';
-
-interface SizeBatch {
-  size: number;
-  pieces: ScaledPiece[];
-  nesting: NestingResult;
-}
+import jsPDF from 'jspdf';
+import { loadImageFromFile, detectarBoundingBoxTinta, detectarNumeroTalla } from './modules/ImageLoader';
+import { calcularFactores, generarEscalas, Mode, ScaleResult, BoundingBoxMM } from './modules/CorelStyleScaler';
+import { DPI, PaperSize, pixelsToMM } from './modules/ScannerConfig';
 
 const App: React.FC = () => {
-  const [screen, setScreen] = useState<Screen>('upload');
-  const [config, setConfig] = useState<ScanConfiguration>({
-    paperSize: 'carta',
-    dpi: 300,
-    baseSize: 36,
-  });
-  const [targetSizes, setTargetSizes] = useState<string>('37,38,39');
-  const [threshold, setThreshold] = useState<number>(180);
-  const [closeRadius, setCloseRadius] = useState<number>(6);
   const [originalImage, setOriginalImage] = useState<HTMLImageElement | null>(null);
-  const [rotated, setRotated] = useState(false);
-  const [pieces, setPieces] = useState<Piece[]>([]);
-  const [selectedPieces, setSelectedPieces] = useState<Set<string>>(new Set());
-  const [batches, setBatches] = useState<SizeBatch[]>([]);
-  const [activeBatchIdx, setActiveBatchIdx] = useState<number>(0);
+  const [imgUrl, setImgUrl] = useState<string>('');
+  const [dpi, setDpi] = useState<DPI>(300);
+  const [paperSize, setPaperSize] = useState<PaperSize>('carta');
+  const [tallaBase, setTallaBase] = useState<number>(0);
+  const [tallaBaseManual, setTallaBaseManual] = useState<string>('36');
+  const [tallaMenor, setTallaMenor] = useState<number>(34);
+  const [tallaMayor, setTallaMayor] = useState<number>(40);
+  const [mode, setMode] = useState<Mode>('molde');
+  const [baseBox, setBaseBox] = useState<BoundingBoxMM | null>(null);
+  const [cropRect, setCropRect] = useState<{x:number;y:number;w:number;h:number} | null>(null);
+  const [escalas, setEscalas] = useState<ScaleResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
   const [message, setMessage] = useState<string | null>(null);
-  const [warning, setWarning] = useState<string | null>(null);
-  const [debugOverlay, setDebugOverlay] = useState<ImageData | null>(null);
-  const [usedRadius, setUsedRadius] = useState<number>(0);
-  const [showDebug, setShowDebug] = useState<boolean>(false);
+  const [rotated, setRotated] = useState(false);
 
-  const originalPreviewRef = useRef<HTMLCanvasElement>(null);
-  const piecesPreviewRef = useRef<HTMLCanvasElement>(null);
-  const nestingPreviewRef = useRef<HTMLCanvasElement>(null);
-  const debugPreviewRef = useRef<HTMLCanvasElement>(null);
+  const previewRef = useRef<HTMLCanvasElement>(null);
+  const resultCanvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileUpload = async (file: File) => {
+  const log = (line: string) => setLogs(l => [...l, line]);
+
+  const handleFile = async (file: File) => {
     try {
       setLoading(true);
-      setWarning(null); setMessage(null); setDebugOverlay(null);
+      setLogs([]);
+      setMessage(null);
+      setEscalas([]);
+      setTallaBase(0);
       const img = await loadImageFromFile(file);
       setOriginalImage(img);
-      setMessage(`Imagen cargada: ${img.width}×${img.height}px. Haz clic en "Detectar piezas".`);
+      setImgUrl(URL.createObjectURL(file));
+      log('=== LOG DE ESCALADO (estilo CorelDRAW) ===');
+      log(`Imagen cargada: ${img.width}×${img.height}px`);
       setLoading(false);
-    } catch {
-      setWarning('Error al cargar la imagen. Intente nuevamente.');
+    } catch (e) {
+      setMessage('Error al cargar la imagen.');
       setLoading(false);
     }
   };
 
-  useEffect(() => {
-    if (!originalImage || !originalPreviewRef.current) return;
-    const canvas = originalPreviewRef.current;
-    const ctx = canvas.getContext('2d')!;
-    const maxW = 700;
-    let drawImg: HTMLImageElement | HTMLCanvasElement = originalImage;
-    let w = originalImage.width, h = originalImage.height;
-    if (rotated) {
-      const c = document.createElement('canvas');
-      c.width = h; c.height = w;
-      const cctx = c.getContext('2d')!;
-      cctx.save();
-      cctx.translate(c.width/2, c.height/2);
-      cctx.rotate(Math.PI/2);
-      cctx.drawImage(originalImage, -w/2, -h/2);
-      cctx.restore();
-      drawImg = c;
-      w = c.width; h = c.height;
-    }
-    const scale = Math.min(1, maxW / w);
-    canvas.width = w * scale;
-    canvas.height = h * scale;
-    ctx.drawImage(drawImg, 0, 0, canvas.width, canvas.height);
-  }, [originalImage, rotated]);
-
-  // Detección con algoritmo de dilatación progresiva
-  const runDetection = useCallback(() => {
+  /**
+   * Detecta automáticamente el BoundingBox de la tinta (el "grupo" seleccionado)
+   * e intenta leer un número (talla) mediante OCR por posición/proximidad de píxeles.
+   * Si no detecta el número, lo deja para ingreso manual.
+   */
+  const procesarImagen = useCallback(() => {
     if (!originalImage) return;
     setLoading(true);
     setTimeout(() => {
       try {
-        const imgData = rotated
-          ? rotateImageData90(originalImage)
-          : getImageDataFromImage(originalImage);
-
-        const { pieces: extracted, debugOverlay: overlay, usedRadius: r } = extractPiecesWithOptions(imgData, config.dpi, {
-          threshold,
-          closeRadius,
-          minPieceMM: 10,
-        });
-
-        setDebugOverlay(overlay);
-        setUsedRadius(r);
-        setPieces(extracted);
-        setSelectedPieces(new Set(extracted.map(p => p.id)));
-        setScreen('detect');
-        if (extracted.length === 0) {
-          setWarning(
-            'No se detectaron piezas cerradas. Prueba a: ' +
-            '(1) subir "Cierre de trazos" a 10-20px, ' +
-            '(2) bajar el umbral si los trazos son claros, ' +
-            '(3) verifica que la orientación sea correcta (el zapato horizontal).'
-          );
+        const img = originalImage;
+        const w0 = img.width, h0 = img.height;
+        const tmp = document.createElement('canvas');
+        tmp.width = w0; tmp.height = h0;
+        const tctx = tmp.getContext('2d')!;
+        if (rotated) {
+          tmp.width = h0; tmp.height = w0;
+          tctx.save();
+          tctx.translate(tmp.width/2, tmp.height/2);
+          tctx.rotate(Math.PI/2);
+          tctx.drawImage(img, -w0/2, -h0/2);
+          tctx.restore();
         } else {
-          setMessage(`✅ Se detectaron ${extracted.length} pieza(s) (radio de dilatación automático: ${r}px). Selecciona las que quieras escalar.`);
+          tctx.drawImage(img, 0, 0);
         }
-      } catch (e) {
-        setWarning('Error procesando imagen: ' + (e as Error).message);
+
+        const imgData = tctx.getImageData(0,0,tmp.width,tmp.height);
+        const bbox = detectarBoundingBoxTinta(imgData);
+
+        if (!bbox) {
+          setMessage('No se detectó tinta en la imagen. Prueba a subir una imagen más contrastada.');
+          setLoading(false);
+          return;
+        }
+
+        const mmPerPx = pixelsToMM(1, dpi).toNumber();
+        const boxMM: BoundingBoxMM = {
+          widthMM: bbox.w * mmPerPx,
+          heightMM: bbox.h * mmPerPx,
+        };
+
+        // Bounding box de la tinta en píxeles sobre la imagen (posiblemente rotada)
+        setCropRect({ x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h });
+        setBaseBox(boxMM);
+
+        log(`BoundingBox detectado (px): x=${bbox.x}, y=${bbox.y}, w=${bbox.w}, h=${bbox.h}`);
+        log(`mmPorPixel (dpi=${dpi}): ${mmPerPx.toFixed(5)}`);
+        log(`BoundingBox en mm: ancho=${boxMM.widthMM.toFixed(2)}mm, alto=${boxMM.heightMM.toFixed(2)}mm`);
+
+        // Intento de detectar la talla del texto "36" usando una detección simple por bloques oscuros pequeños
+        const detected = detectarNumeroTalla(imgData, bbox);
+        if (detected > 0) {
+          setTallaBase(detected);
+          log(`Talla detectada automáticamente: ${detected}`);
+        } else {
+          log('Talla NO detectada automáticamente. Ingresa manualmente.');
+          setTallaBase(parseInt(tallaBaseManual,10) || 36);
+        }
+
+        setMessage('Imagen procesada. Ingresa el rango de tallas y pulsa "Generar tallas".');
+      } catch (e: any) {
+        setMessage('Error procesando: ' + e.message);
       }
       setLoading(false);
     }, 50);
-  }, [originalImage, rotated, config.dpi, threshold, closeRadius]);
+  }, [originalImage, dpi, rotated, tallaBaseManual]);
 
-  // Dibujar overlay de depuración
+  // Dibujar preview con el bounding box recortado
   useEffect(() => {
-    if (debugOverlay && debugPreviewRef.current && showDebug) {
-      const canvas = debugPreviewRef.current;
-      canvas.width = debugOverlay.width;
-      canvas.height = debugOverlay.height;
-      const ctx = canvas.getContext('2d')!;
-      ctx.putImageData(debugOverlay, 0, 0);
-    }
-  }, [debugOverlay, showDebug]);
-
-  // Dibujar piezas detectadas
-  useEffect(() => {
-    if (!piecesPreviewRef.current) return;
-    const canvas = piecesPreviewRef.current;
+    if (!originalImage || !previewRef.current || !cropRect) return;
+    const canvas = previewRef.current;
     const ctx = canvas.getContext('2d')!;
-    const padding = 30;
-    const scale = 4;
-    const cols = Math.min(pieces.length || 1, 3);
-    const rows = Math.ceil(Math.max(pieces.length, 1) / cols);
-    const maxW = Math.max(1, ...pieces.map(p => p.widthMM));
-    const maxH = Math.max(1, ...pieces.map(p => p.heightMM));
-    const cellW = maxW * scale + padding * 2;
-    const cellH = maxH * scale + padding * 2;
+    const maxW = 600;
+    const scale = Math.min(1, maxW / cropRect.w);
+    canvas.width = cropRect.w * scale;
+    canvas.height = cropRect.h * scale;
+    const tmp = document.createElement('canvas');
+    let w=originalImage.width, h=originalImage.height;
+    if (rotated) { tmp.width = h; tmp.height = w; } else { tmp.width = w; tmp.height = h; }
+    const tctx = tmp.getContext('2d')!;
+    if (rotated) {
+      tctx.save(); tctx.translate(tmp.width/2, tmp.height/2); tctx.rotate(Math.PI/2);
+      tctx.drawImage(originalImage,-w/2,-h/2); tctx.restore();
+    } else {
+      tctx.drawImage(originalImage,0,0);
+    }
+    ctx.drawImage(tmp, cropRect.x, cropRect.y, cropRect.w, cropRect.h, 0, 0, canvas.width, canvas.height);
+  }, [originalImage, cropRect, rotated]);
 
-    canvas.width = cols * cellW;
-    canvas.height = rows * cellH;
-    ctx.fillStyle = '#fafafa';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const generar = () => {
+    if (!baseBox) { setMessage('Primero procesa la imagen.'); return; }
+    const tb = tallaBase || parseInt(tallaBaseManual,10);
+    if (!tb) { setMessage('Ingresa una talla base válida.'); return; }
+    setTallaBase(tb);
+    if (tallaMenor > tallaMayor) { setMessage('La talla menor no puede ser mayor que la mayor.'); return; }
 
-    pieces.forEach((piece, idx) => {
-      const col = idx % cols;
-      const row = Math.floor(idx / cols);
-      const cx = col * cellW + cellW / 2;
-      const cy = row * cellH + cellH / 2;
-      const ox = cx - (piece.widthMM * scale) / 2;
-      const oy = cy - (piece.heightMM * scale) / 2;
+    const result = generarEscalas(mode, baseBox, tb, tallaMenor, tallaMayor, 25);
+    setEscalas(result);
 
-      ctx.save();
-      ctx.translate(ox, oy);
-      ctx.strokeStyle = selectedPieces.has(piece.id) ? '#000' : '#d1d5db';
-      ctx.fillStyle = selectedPieces.has(piece.id) ? 'rgba(37,99,235,0.08)' : 'transparent';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      piece.points.forEach((p, i) => {
-        const px = p.x * scale, py = p.y * scale;
-        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-      });
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = '#ef4444';
-      ctx.font = 'bold 11px sans-serif';
-      ctx.fillText('← Talón', 2, -4);
-      ctx.fillText('Punta →', piece.widthMM * scale - 52, -4);
-      ctx.fillStyle = '#374151';
-      ctx.fillText(`#${idx+1} · ${piece.widthMM.toFixed(1)}×${piece.heightMM.toFixed(1)}mm`, 2, piece.heightMM * scale + 14);
-      ctx.restore();
-    });
-  }, [pieces, selectedPieces]);
-
-  const togglePiece = (id: string) => {
-    const next = new Set(selectedPieces);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    setSelectedPieces(next);
+    log('');
+    log(`Modo: ${mode.toUpperCase()}`);
+    log(`Talla base: ${tb}`);
+    log(`Rango: ${tallaMenor} → ${tallaMayor}`);
+    log('');
+    for (const r of result) {
+      log(`--- Talla ${r.size} (dif=${r.size - tb}) ---`);
+      log(`   factorAncho=${r.factorAncho.toFixed(6)}  factorLargo=${r.factorLargo.toFixed(6)}`);
+      log(`   ANTES mm: ancho=${baseBox.widthMM.toFixed(2)}  alto=${baseBox.heightMM.toFixed(2)}`);
+      log(`   DESPUES mm: ancho=${r.newWidthMM.toFixed(2)}  alto=${r.newHeightMM.toFixed(2)}`);
+      log(`   Δ mm: ancho=${r.deltaAnchoMM.toFixed(2)}  alto=${r.deltaLargoMM.toFixed(2)}`);
+    }
+    log('');
+    log('ESCALADO COMPLETADO');
+    setMessage(`Se generaron ${result.length} tallas desde ${tallaMenor} hasta ${tallaMayor}.`);
   };
 
-  const doScaleAndNest = useCallback(() => {
-    const chosen = pieces.filter(p => selectedPieces.has(p.id));
-    if (chosen.length === 0) { setWarning('Selecciona al menos una pieza.'); return; }
-    const sizes = targetSizes.split(/[,\s]+/).map(s => parseInt(s.trim(),10)).filter(n => !isNaN(n) && n>20 && n<50);
-    if (sizes.length === 0) { setWarning('Ingresa al menos una talla destino (ej. 37,38,39).'); return; }
-    setLoading(true);
-    setTimeout(() => {
-      const newBatches: SizeBatch[] = sizes.map(size => {
-        const scaled = scaleAllPieces(chosen, config.baseSize, size);
-        const nesting = autoNest(scaled, { paperSize: config.paperSize, marginMM: 8 });
-        return { size, pieces: scaled, nesting };
-      });
-      setBatches(newBatches);
-      setActiveBatchIdx(0);
-      setScreen('result');
-      setMessage(`Escalado de talla ${config.baseSize} a [${sizes.join(', ')}] completado.`);
-      setLoading(false);
-    }, 100);
-  }, [pieces, selectedPieces, targetSizes, config]);
-
+  // Dibujar canvas con todas las tallas alineadas (como hace Corel)
   useEffect(() => {
-    if (batches.length === 0 || !nestingPreviewRef.current) return;
-    const batch = batches[activeBatchIdx];
-    if (!batch) return;
-    const canvas = nestingPreviewRef.current;
+    if (!resultCanvasRef.current || escalas.length === 0 || !originalImage || !cropRect) return;
+    const canvas = resultCanvasRef.current;
     const ctx = canvas.getContext('2d')!;
-    const padding = 30;
-    const scale = Math.min(2.5, 900 / batch.nesting.totalWidthMM);
-    canvas.width = batch.nesting.totalWidthMM * scale + padding*2;
-    canvas.height = batch.nesting.totalHeightMM * scale + padding*2;
+
+    const totalW = escalas[escalas.length-1].offsetXMM + escalas[escalas.length-1].newWidthMM;
+    const maxH = Math.max(...escalas.map(e => e.newHeightMM));
+    const mmPerPx = pixelsToMM(1, dpi).toNumber();
+    const canvasScalePxPerMM = 2.5; // px por mm en el canvas de resultado
+    canvas.width = totalW * canvasScalePxPerMM + 40;
+    canvas.height = maxH * canvasScalePxPerMM + 40;
     ctx.fillStyle = '#fff';
     ctx.fillRect(0,0,canvas.width,canvas.height);
-    ctx.strokeStyle = '#94a3b8';
-    ctx.setLineDash([4,4]);
-    ctx.strokeRect(padding, padding, batch.nesting.totalWidthMM*scale, batch.nesting.totalHeightMM*scale);
-    ctx.setLineDash([]);
-    ctx.strokeStyle = '#000';
-    ctx.lineWidth = 1;
-    for (const np of batch.nesting.pieces) {
-      ctx.save();
-      ctx.translate(padding + np.offsetX*scale, padding + np.offsetY*scale);
-      ctx.beginPath();
-      np.piece.points.forEach((p, i) => {
-        const px = p.x*scale, py = p.y*scale;
-        if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
-      });
-      ctx.closePath();
-      ctx.stroke();
-      ctx.restore();
-    }
-    ctx.fillStyle = '#374151';
-    ctx.font = '12px sans-serif';
-    ctx.fillText(`Talla ${batch.size} — contornos listos para cortar`, padding, canvas.height-8);
-  }, [batches, activeBatchIdx]);
 
-  const downloadDXF = (batch: SizeBatch) => {
-    downloadFile(exportToDXF(batch.nesting.pieces, 'MM'), `patronaje_talla${batch.size}.dxf`, 'application/dxf');
+    // Preparar canvas con la imagen recortada del molde base
+    const tmp = document.createElement('canvas');
+    tmp.width = cropRect.w; tmp.height = cropRect.h;
+    const tctx = tmp.getContext('2d')!;
+    let w=originalImage.width,h=originalImage.height;
+    const full = document.createElement('canvas');
+    if (rotated) { full.width = h; full.height = w; } else { full.width = w; full.height = h; }
+    const fctx = full.getContext('2d')!;
+    if (rotated) {
+      fctx.save(); fctx.translate(full.width/2,full.height/2); fctx.rotate(Math.PI/2);
+      fctx.drawImage(originalImage,-w/2,-h/2); fctx.restore();
+    } else {
+      fctx.drawImage(originalImage,0,0);
+    }
+    tctx.drawImage(full, cropRect.x, cropRect.y, cropRect.w, cropRect.h, 0, 0, cropRect.w, cropRect.h);
+
+    // Dibujar cada talla
+    for (const e of escalas) {
+      const wPx = e.newWidthMM / mmPerPx;
+      const hPx = e.newHeightMM / mmPerPx;
+      ctx.drawImage(
+        tmp,
+        20 + e.offsetXMM * canvasScalePxPerMM,
+        20,
+        wPx * mmPerPx * canvasScalePxPerMM,
+        hPx * mmPerPx * canvasScalePxPerMM
+      );
+      // Etiqueta de talla debajo
+      ctx.fillStyle = '#2563eb';
+      ctx.font = 'bold 14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`Talla ${e.size}`, 20 + (e.offsetXMM + e.newWidthMM/2)*canvasScalePxPerMM, 20 + maxH*canvasScalePxPerMM + 20);
+    }
+  }, [escalas, originalImage, cropRect, dpi, rotated]);
+
+  const descargarPDF = () => {
+    if (!resultCanvasRef.current) return;
+    const canvas = resultCanvasRef.current;
+    const totalWMM = parseFloat((canvas.width/2.5).toFixed(2));
+    const totalHMM = parseFloat((canvas.height/2.5).toFixed(2));
+    const pdf = new jsPDF({ orientation: totalWMM>totalHMM?'landscape':'portrait', unit:'mm', format:[totalWMM+20, totalHMM+20] });
+    const imgData = canvas.toDataURL('image/png');
+    pdf.addImage(imgData, 'PNG', 10, 10, totalWMM, totalHMM);
+    pdf.save(`escalado_tallas_${tallaMenor}-${tallaMayor}.pdf`);
   };
-  const downloadPDF = (batch: SizeBatch) => {
-    exportToPDF(batch.nesting.pieces, config.paperSize, `patronaje_talla${batch.size}.pdf`);
+
+  const descargarPNG = () => {
+    if (!resultCanvasRef.current) return;
+    const a = document.createElement('a');
+    a.href = resultCanvasRef.current.toDataURL('image/png');
+    a.download = `escalado_tallas_${tallaMenor}-${tallaMayor}.png`;
+    a.click();
   };
-  const downloadAllDXF = () => batches.forEach((b, i) => setTimeout(() => downloadDXF(b), i*200));
+
+  const descargarLog = () => {
+    const blob = new Blob([logs.join('\n')], {type:'text/plain'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `log_escalado_${Date.now()}.txt`;
+    a.click();
+  };
 
   const reset = () => {
-    setScreen('upload');
-    setOriginalImage(null);
-    setDebugOverlay(null);
-    setPieces([]); setBatches([]);
-    setSelectedPieces(new Set());
-    setRotated(false);
-    setMessage(null); setWarning(null);
-    setShowDebug(false);
+    setOriginalImage(null); setImgUrl(''); setCropRect(null); setBaseBox(null);
+    setEscalas([]); setLogs([]); setTallaBase(0); setMessage(null); setRotated(false);
   };
-
-  const firstTarget = parseInt(targetSizes.split(',')[0],10) || config.baseSize+1;
-  const { factorX, factorY } = calculateGlobalFactors(config.baseSize, firstTarget);
 
   return (
     <div className="app-container">
-      <h1>👞 Patronaje Digital de Calzado</h1>
-      <p className="subtitle">Escalado Proporcional por Punto Francés · 100% en el navegador</p>
-
-      <div className="step-indicator">
-        <div className={`step ${screen==='upload'?'active':'done'}`}>1. Configuración</div>
-        <div className={`step ${screen==='detect'?'active':screen==='result'?'done':''}`}>2. Detectar piezas</div>
-        <div className={`step ${screen==='result'?'active':''}`}>3. Escalar y exportar</div>
-      </div>
+      <h1>👞 Escalado de Calzado (estilo CorelDRAW)</h1>
+      <p className="subtitle">Replicación web 1:1 del macro de CorelDRAW · Stretch(factorAncho, factorLargo) sobre el grupo completo</p>
 
       {message && <div className="stats-box"><p>{message}</p></div>}
-      {warning && <div className="warning-box"><p>⚠️ {warning}</p></div>}
       {loading && <div className="stats-box"><p>⏳ Procesando...</p></div>}
 
-      {screen==='upload' && (
-        <div className="screen">
-          <h2>Paso 1: Configuración de escaneo</h2>
-          <p style={{color:'#6b7280', marginBottom:20}}>Sube una foto/escaneo nítido de tus moldes en papel blanco con trazos negros. El zapato debe quedar horizontal (talón a la izquierda, punta a la derecha).</p>
+      <div className="screen">
+        <h2>1. Cargar imagen del molde</h2>
 
-          <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:16}}>
-            <div className="form-group">
-              <label>Tamaño de papel</label>
-              <select value={config.paperSize} onChange={e=>setConfig({...config,paperSize:e.target.value as PaperSize})}>
-                <option value="carta">Carta (279.4 × 215.9 mm)</option>
-                <option value="oficio">Oficio (355.6 × 215.9 mm)</option>
-                <option value="a4">A4 (297 × 210 mm)</option>
-              </select>
-            </div>
-            <div className="form-group">
-              <label>DPI del escáner</label>
-              <select value={config.dpi} onChange={e=>setConfig({...config,dpi:parseInt(e.target.value) as DPI})}>
-                <option value={300}>300 DPI</option>
-                <option value={600}>600 DPI</option>
-              </select>
-            </div>
-            <div className="form-group">
-              <label>Talla base del dibujo (EU)</label>
-              <input type="number" min={20} max={50} value={config.baseSize}
-                onChange={e=>setConfig({...config,baseSize:parseInt(e.target.value)||36})}/>
-            </div>
+        <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:16}}>
+          <div className="form-group">
+            <label>DPI del escaneo</label>
+            <select value={dpi} onChange={e=>setDpi(parseInt(e.target.value) as DPI)}>
+              <option value={300}>300 DPI</option>
+              <option value={600}>600 DPI</option>
+            </select>
           </div>
-
-          <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:16}}>
-            <div className="form-group">
-              <label>Umbral binarizado ({threshold})</label>
-              <input type="range" min={80} max={240} value={threshold}
-                onChange={e=>setThreshold(parseInt(e.target.value))}/>
-              <small style={{color:'#6b7280'}}>Bájalo si los trazos son grises/claros. Súbelo si el papel tiene sombra.</small>
-            </div>
-            <div className="form-group">
-              <label>Cierre inicial de trazos ({closeRadius}px)</label>
-              <input type="range" min={2} max={25} value={closeRadius}
-                onChange={e=>setCloseRadius(parseInt(e.target.value))}/>
-              <small style={{color:'#6b7280'}}>Cuánto "inflar" los trazos para cerrar huecos. Si no detecta nada, súbelo a 12-20. El algoritmo subirá automáticamente si no encuentra piezas.</small>
-            </div>
+          <div className="form-group">
+            <label>Tamaño de papel (para exportar PDF)</label>
+            <select value={paperSize} onChange={e=>setPaperSize(e.target.value as PaperSize)}>
+              <option value="carta">Carta</option>
+              <option value="oficio">Oficio</option>
+              <option value="a4">A4</option>
+            </select>
           </div>
-
-          <div
-            className="file-input-area"
-            onClick={()=>fileInputRef.current?.click()}
-            onDragOver={e=>{e.preventDefault(); e.currentTarget.classList.add('dragover');}}
-            onDragLeave={e=>e.currentTarget.classList.remove('dragover')}
-            onDrop={e=>{e.preventDefault(); e.currentTarget.classList.remove('dragover'); if(e.dataTransfer.files[0]) handleFileUpload(e.dataTransfer.files[0]);}}>
-            <input ref={fileInputRef} type="file" accept="image/*" style={{display:'none'}}
-              onChange={e=>e.target.files?.[0]&&handleFileUpload(e.target.files[0])}/>
-            <p style={{fontSize:18,marginBottom:8}}>📁 Haz clic o arrastra la imagen aquí</p>
-            <p style={{color:'#6b7280',fontSize:14}}>JPG / PNG · trazos negros sobre papel blanco bien iluminado</p>
+          <div className="form-group">
+            <label>Modo</label>
+            <select value={mode} onChange={e=>setMode(e.target.value as Mode)}>
+              <option value="molde">Molde (+3.33mm / +6.67mm por talla)</option>
+              <option value="plantilla">Plantilla (+4.18mm / +8.34mm por talla)</option>
+            </select>
           </div>
-
-          {originalImage && (
-            <>
-              <div className="preview-container"><canvas ref={originalPreviewRef}/></div>
-              <p style={{fontSize:13,color:'#6b7280',textAlign:'center',marginTop:8}}>
-                Orientación: ← TALÓN (izquierda) | PUNTA → (derecha) · Y = Suela → Empeine
-              </p>
-              <div className="button-row">
-                <button className="secondary" onClick={()=>setRotated(!rotated)}>🔄 Rotar 90° {rotated?'(activado)':''}</button>
-                <button onClick={runDetection} disabled={loading}>{loading?'Detectando...':'🔍 Detectar piezas'}</button>
-              </div>
-            </>
-          )}
         </div>
-      )}
 
-      {screen==='detect' && (
+        <div
+          className="file-input-area"
+          onClick={()=>fileInputRef.current?.click()}
+          onDragOver={e=>{e.preventDefault(); e.currentTarget.classList.add('dragover');}}
+          onDragLeave={e=>e.currentTarget.classList.remove('dragover')}
+          onDrop={e=>{e.preventDefault(); e.currentTarget.classList.remove('dragover'); if(e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);}}>
+          <input ref={fileInputRef} type="file" accept="image/*" style={{display:'none'}}
+            onChange={e=>e.target.files?.[0]&&handleFile(e.target.files[0])}/>
+          <p style={{fontSize:18,marginBottom:8}}>📁 Arrastra el escaneo del molde o haz clic</p>
+          <p style={{color:'#6b7280',fontSize:14}}>JPG/PNG · Escanea/exporta el MOLDE COMPLETO (como lo seleccionas en Corel)</p>
+        </div>
+
+        {originalImage && (
+          <>
+            <div className="button-row">
+              <button className="secondary" onClick={()=>setRotated(!rotated)}>🔄 Rotar 90° {rotated?'(deshacer)':''}</button>
+              <button onClick={procesarImagen} disabled={loading}>🔍 Detectar bounding box del molde</button>
+            </div>
+            {cropRect && (
+              <>
+                <div style={{marginTop:20}}>
+                  <h3>Previsualización del molde detectado (se escalará como grupo completo):</h3>
+                  <div className="preview-container" style={{marginTop:10}}><canvas ref={previewRef}/></div>
+                </div>
+
+                <div style={{display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16, marginTop:20}}>
+                  <div className="form-group">
+                    <label>Talla base (detectada o manual)</label>
+                    <input type="number" min={20} max={50}
+                      value={tallaBase || tallaBaseManual}
+                      onChange={e=>{setTallaBase(0); setTallaBaseManual(e.target.value);}}/>
+                  </div>
+                  <div className="form-group">
+                    <label>Talla menor</label>
+                    <input type="number" min={20} max={50} value={tallaMenor}
+                      onChange={e=>setTallaMenor(parseInt(e.target.value)||tallaMenor)}/>
+                  </div>
+                  <div className="form-group">
+                    <label>Talla mayor</label>
+                    <input type="number" min={20} max={50} value={tallaMayor}
+                      onChange={e=>setTallaMayor(parseInt(e.target.value)||tallaMayor)}/>
+                  </div>
+                </div>
+
+                {baseBox && (
+                  <div className="stats-box">
+                    <h4>📐 BoundingBox base (igual que CorelDRAW mediría el grupo)</h4>
+                    <div className="stats-grid">
+                      <div className="stat-item"><div className="stat-label">Ancho (mm)</div><div className="stat-value">{baseBox.widthMM.toFixed(2)}</div></div>
+                      <div className="stat-item"><div className="stat-label">Alto/Largo (mm)</div><div className="stat-value">{baseBox.heightMM.toFixed(2)}</div></div>
+                      <div className="stat-item"><div className="stat-label">DPI</div><div className="stat-value">{dpi}</div></div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="button-row">
+                  <button className="secondary" onClick={reset}>← Reiniciar</button>
+                  <button onClick={generar}>📏 Generar tallas (igual que "Generar Tallas" en Corel)</button>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+
+      {escalas.length > 0 && (
         <div className="screen">
-          <h2>Paso 2: Revisa las piezas detectadas</h2>
-          <p style={{color:'#6b7280', marginBottom:16}}>
-            Haz clic en una pieza para incluirla/excluirla. Se usó un radio de dilatación de <b>{usedRadius}px</b> para cerrar los trazos.
+          <h2>2. Resultado del escalado</h2>
+          <p style={{color:'#6b7280',marginBottom:12}}>
+            Cada talla es el molde duplicado y escalado con Stretch(), posicionado al lado con gap de 25mm, exactamente como hace la macro.
           </p>
 
-          {debugOverlay && (
-            <div style={{marginBottom:12}}>
-              <button className="secondary" style={{width:'auto',padding:'8px 16px',fontSize:14}}
-                onClick={()=>setShowDebug(!showDebug)}>
-                {showDebug?'Ocultar':'Ver'} depuración (rojo = tinta usada, azul = interior detectado)
-              </button>
-              {showDebug && (
-                <div className="preview-container" style={{marginTop:10}}>
-                  <canvas ref={debugPreviewRef} style={{maxWidth:'100%'}}/>
-                </div>
-              )}
-            </div>
-          )}
-
-          <div className="preview-container" onClick={e=>{
-            if(!piecesPreviewRef.current) return;
-            const canvas = piecesPreviewRef.current;
-            const rect = canvas.getBoundingClientRect();
-            const mx = (e.clientX-rect.left)*(canvas.width/rect.width);
-            const my = (e.clientY-rect.top)*(canvas.height/rect.height);
-            const padding = 30;
-            const scale = 4;
-            const cols = Math.min(pieces.length,3);
-            const maxW = Math.max(...pieces.map(p=>p.widthMM));
-            const maxH = Math.max(...pieces.map(p=>p.heightMM));
-            const cellW = maxW*scale + padding*2;
-            const cellH = maxH*scale + padding*2;
-            const col = Math.floor(mx/cellW);
-            const row = Math.floor(my/cellH);
-            const idx = row*cols+col;
-            if(idx>=0 && idx<pieces.length) togglePiece(pieces[idx].id);
-          }} style={{cursor:'pointer'}}>
-            <canvas ref={piecesPreviewRef}/>
-          </div>
-
-          <div className="form-group" style={{marginTop:24}}>
-            <label>Tallas destino (EU) — separadas por coma</label>
-            <input type="text" value={targetSizes} onChange={e=>setTargetSizes(e.target.value)}
-              placeholder="ej. 37,38,39,40"/>
-            <small style={{color:'#6b7280'}}>Generarás un archivo por cada talla, escaladas desde la talla base {config.baseSize}.</small>
-          </div>
+          <div className="preview-container"><canvas ref={resultCanvasRef}/></div>
 
           <div className="stats-box">
-            <h4>📐 Factores de escalado (base {config.baseSize} → primera talla {firstTarget})</h4>
+            <h4>📊 Factores aplicados</h4>
             <div className="stats-grid">
-              <div className="stat-item"><div className="stat-label">Longitud base</div><div className="stat-value">{calculateLastLengthMM(config.baseSize).toFixed(2)} mm</div></div>
-              <div className="stat-item"><div className="stat-label">Factor X (longitudinal)</div><div className="stat-value">{factorX.toFixed(5)}</div></div>
-              <div className="stat-item"><div className="stat-label">Factor Y (transversal)</div><div className="stat-value">{factorY.toFixed(5)}</div></div>
-              <div className="stat-item"><div className="stat-label">Piezas seleccionadas</div><div className="stat-value">{selectedPieces.size} / {pieces.length}</div></div>
+              {escalas.map(e => (
+                <div key={e.size} className="stat-item">
+                  <div className="stat-label">Talla {e.size}</div>
+                  <div className="stat-value" style={{fontSize:12}}>fA={e.factorAncho.toFixed(4)} fL={e.factorLargo.toFixed(4)}</div>
+                </div>
+              ))}
             </div>
           </div>
 
           <div className="button-row">
-            <button className="secondary" onClick={()=>setScreen('upload')}>← Volver</button>
-            <button onClick={doScaleAndNest} disabled={loading}>{loading?'Escalando...':'📏 Escalar y reacomodar'}</button>
-          </div>
-        </div>
-      )}
-
-      {screen==='result' && batches.length>0 && (
-        <div className="screen">
-          <h2>Paso 3: Resultado</h2>
-          <p style={{color:'#6b7280', marginBottom:12}}>Piezas escaladas proporcionalmente y reacomodadas en la hoja.</p>
-
-          <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
-            {batches.map((b,i)=>(
-              <button key={b.size} onClick={()=>setActiveBatchIdx(i)}
-                style={{flex:'0 0 auto',width:'auto',padding:'10px 20px',
-                  background:i===activeBatchIdx?'#2563eb':'#e5e7eb',
-                  color:i===activeBatchIdx?'white':'#111'}}>
-                Talla {b.size}
-              </button>
-            ))}
+            <button className="success" onClick={descargarPDF}>⬇️ Descargar PDF</button>
+            <button className="success" onClick={descargarPNG}>⬇️ Descargar PNG</button>
+            <button onClick={descargarLog}>📄 Descargar log</button>
           </div>
 
-          <div className="preview-container"><canvas ref={nestingPreviewRef}/></div>
-
-          {(() => {
-            const b = batches[activeBatchIdx];
-            const fx = calculateGlobalFactors(config.baseSize, b.size).factorX;
-            const fy = calculateGlobalFactors(config.baseSize, b.size).factorY;
-            return (
-              <div className="stats-box">
-                <h4>📊 Talla {b.size}</h4>
-                <div className="stats-grid">
-                  <div className="stat-item"><div className="stat-label">Factor X</div><div className="stat-value">{fx.toFixed(5)}</div></div>
-                  <div className="stat-item"><div className="stat-label">Factor Y</div><div className="stat-value">{fy.toFixed(5)}</div></div>
-                  <div className="stat-item"><div className="stat-label">Piezas</div><div className="stat-value">{b.nesting.pieces.length}</div></div>
-                  <div className="stat-item"><div className="stat-label">Lienzo</div><div className="stat-value">{b.nesting.totalWidthMM.toFixed(1)}×{b.nesting.totalHeightMM.toFixed(1)}mm</div></div>
-                </div>
-              </div>
-            );
-          })()}
-
-          <div className="button-row">
-            <button className="secondary" onClick={()=>setScreen('detect')}>← Volver</button>
-            <button className="success" onClick={()=>downloadDXF(batches[activeBatchIdx])}>⬇️ DXF talla {batches[activeBatchIdx].size}</button>
-            <button className="success" onClick={()=>downloadPDF(batches[activeBatchIdx])}>⬇️ PDF talla {batches[activeBatchIdx].size}</button>
-          </div>
-          <div className="button-row">
-            <button onClick={downloadAllDXF}>⬇️ Descargar DXF de TODAS las tallas</button>
-            <button className="secondary" onClick={reset}>🔄 Nuevo escaneo</button>
+          <div style={{marginTop:20}}>
+            <h4>Log (igual que el log de la macro):</h4>
+            <pre style={{background:'#f3f4f6', padding:12, borderRadius:8, fontSize:12, overflowX:'auto', maxHeight:300, overflowY:'auto'}}>
+{logs.join('\n')}
+            </pre>
           </div>
         </div>
       )}
