@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import RectSelector, { OverlayRect } from './components/RectSelector';
-import SizePreview from './components/SizePreview';
+import SizePreview, { drawRegionNumber } from './components/SizePreview';
 import {
   PxRect,
   createCropCanvas,
   createWorkCanvas,
   detectarBoundingBoxTinta,
+  detectarNumerosEscritos,
   loadImageFromFile,
 } from './modules/ImageLoader';
 import { BoundingBoxMM, Mode, ScaleResult, generarEscalas } from './modules/CorelStyleScaler';
@@ -14,7 +15,6 @@ import {
   DEFAULT_PRINT_SETTINGS,
   Orientation,
   PrintSettings,
-  Rect,
   SizeLayout,
   describeLayout,
   layoutSize,
@@ -23,15 +23,29 @@ import {
 import {
   DEFAULT_NUMBERING,
   ExportJob,
+  NumberRegion,
   NumberingMode,
   NumberingSettings,
   StampCorner,
+  TextAngle,
   buildAllInOneSheetPdf,
   buildMultiPagePdf,
   dataUrlToBytes,
 } from './modules/PdfExporter';
 
 type Tool = 'crop' | 'number' | null;
+
+/** Número escrito a mano marcado sobre la imagen de trabajo (px) + orientación del texto. */
+interface NumMark extends PxRect {
+  angle: TextAngle;
+}
+
+const ANGLE_LABELS: Record<TextAngle, string> = {
+  0: 'Horizontal',
+  90: 'Girado 90° (se lee de abajo a arriba)',
+  180: 'Al revés (180°)',
+  270: 'Girado 270° (se lee de arriba a abajo)',
+};
 
 /** Miniatura de una región de la imagen de trabajo (p. ej. el número marcado). */
 const RegionThumb: React.FC<{ source: HTMLCanvasElement; rect: PxRect }> = ({ source, rect }) => {
@@ -60,7 +74,7 @@ const App: React.FC = () => {
 
   // --- Recorte / número ---
   const [cropRect, setCropRect] = useState<PxRect | null>(null);
-  const [numRect, setNumRect] = useState<PxRect | null>(null);
+  const [numMarks, setNumMarks] = useState<NumMark[]>([]);
   const [tool, setTool] = useState<Tool>(null);
 
   // --- Tallas ---
@@ -96,7 +110,7 @@ const App: React.FC = () => {
       setMessage(null);
       setGenerated(false);
       setCropRect(null);
-      setNumRect(null);
+      setNumMarks([]);
       setTool(null);
       setRotated(false);
       const img = await loadImageFromFile(file);
@@ -143,12 +157,34 @@ const App: React.FC = () => {
     logEvent(`BoundingBox detectado (px): x=${ox}, y=${oy}, w=${ow}, h=${oh} · umbral=${det.threshold}${trimmedTxt}`);
     logEvent(`mmPorPixel (dpi=${dpi}): ${(25.4 / dpi).toFixed(5)}`);
     logEvent(`BoundingBox en mm: ancho=${(ow * 25.4 / dpi).toFixed(2)}mm, alto=${(oh * 25.4 / dpi).toFixed(2)}mm`);
-    setMessage('Recuadro del molde detectado. Revísalo (puedes ajustarlo arrastrando), marca el número escrito si quieres que se re-enumere, e ingresa las tallas.');
+
+    // Números de talla escritos en el molde: se detectan solos para re-enumerarlos
+    const mmPerPxW = (25.4 / dpi) / work.scale;
+    const found = detectarNumerosEscritos(data, det.bbox, mmPerPxW);
+    setNumMarks(found.map(f => ({ x: f.x, y: f.y, w: f.w, h: f.h, angle: f.angle })));
+    logEvent(found.length > 0
+      ? `Números escritos detectados: ${found.length} (${found.map(f => `${(f.w * mmPerPxW).toFixed(0)}×${(f.h * mmPerPxW).toFixed(0)} mm${f.angle ? ' girado' : ''}`).join(', ')}). Se borrarán y se escribirá la talla nueva en cada copia.`
+      : 'Números escritos: ninguno detectado automáticamente. Puedes marcarlos a mano.');
+    setMessage(found.length > 0
+      ? `Recuadro del molde detectado y ${found.length} número(s) escrito(s) encontrado(s) (recuadros rojos). Revísalos, ingresa las tallas y genera.`
+      : 'Recuadro del molde detectado. No se encontraron números escritos: márcalos a mano si quieres re-enumerar cada pieza.');
   }, [work, dpi, logEvent]);
+
+  const detectarNumeros = () => {
+    if (!work || !cropRect) return;
+    const ctx = work.canvas.getContext('2d')!;
+    const data = ctx.getImageData(0, 0, work.canvas.width, work.canvas.height);
+    const mmPerPxW = (25.4 / dpi) / work.scale;
+    const found = detectarNumerosEscritos(data, cropRect, mmPerPxW);
+    setNumMarks(found.map(f => ({ x: f.x, y: f.y, w: f.w, h: f.h, angle: f.angle })));
+    setNumbering(n => ({ ...n, mode: 'molde' }));
+    setMessage(found.length > 0 ? `Se encontraron ${found.length} número(s) escrito(s).` : 'No se encontraron números escritos dentro del recuadro. Márcalos a mano arrastrando.');
+    logEvent(`Detección de números repetida: ${found.length} encontrado(s)`);
+  };
 
   useEffect(() => {
     if (!work) return;
-    setNumRect(null);
+    setNumMarks([]);
     setTool(null);
     const t = setTimeout(detectar, 20);
     return () => clearTimeout(t);
@@ -169,17 +205,22 @@ const App: React.FC = () => {
     ? { widthMM: cropRect.w * mmPerPxWork, heightMM: cropRect.h * mmPerPxWork }
     : null;
 
-  // Región del número escrito a mano, en mm relativos al recuadro del molde
-  const handwrittenRegionMM: Rect | null = useMemo(() => {
-    if (!numRect || !cropRect || !work) return null;
-    const x0 = Math.max(numRect.x, cropRect.x), y0 = Math.max(numRect.y, cropRect.y);
-    const x1 = Math.min(numRect.x + numRect.w, cropRect.x + cropRect.w);
-    const y1 = Math.min(numRect.y + numRect.h, cropRect.y + cropRect.h);
-    if (x1 - x0 < 2 || y1 - y0 < 2) return null;
-    return { x: (x0 - cropRect.x) * mmPerPxWork, y: (y0 - cropRect.y) * mmPerPxWork, w: (x1 - x0) * mmPerPxWork, h: (y1 - y0) * mmPerPxWork };
-  }, [numRect, cropRect, work, mmPerPxWork]);
+  // Regiones de los números escritos a mano, en mm relativos al recuadro del molde
+  const handwrittenRegionsMM: NumberRegion[] = useMemo(() => {
+    if (!cropRect || !work) return [];
+    const out: NumberRegion[] = [];
+    for (const m of numMarks) {
+      const x0 = Math.max(m.x, cropRect.x), y0 = Math.max(m.y, cropRect.y);
+      const x1 = Math.min(m.x + m.w, cropRect.x + cropRect.w);
+      const y1 = Math.min(m.y + m.h, cropRect.y + cropRect.h);
+      if (x1 - x0 < 2 || y1 - y0 < 2) continue;
+      out.push({ x: (x0 - cropRect.x) * mmPerPxWork, y: (y0 - cropRect.y) * mmPerPxWork, w: (x1 - x0) * mmPerPxWork, h: (y1 - y0) * mmPerPxWork, angle: m.angle });
+    }
+    return out;
+  }, [numMarks, cropRect, work, mmPerPxWork]);
+  const hasRegions = handwrittenRegionsMM.length > 0;
 
-  const numberingFull: NumberingSettings = useMemo(() => ({ ...numbering, handwrittenRegionMM }), [numbering, handwrittenRegionMM]);
+  const numberingFull: NumberingSettings = useMemo(() => ({ ...numbering, handwrittenRegionsMM }), [numbering, handwrittenRegionsMM]);
 
   const tallaBase = parseInt(tallaBaseTxt, 10);
   const rangoValido = Number.isFinite(tallaBase) && tallaBase > 0 && tallaMenor <= tallaMayor && tallaMayor - tallaMenor <= 30;
@@ -218,16 +259,16 @@ const App: React.FC = () => {
     }
     lines.push('', 'ESCALADO COMPLETADO', '');
     lines.push(`=== ENUMERACIÓN ===`);
-    lines.push(numberingFull.mode === 'hoja'
-      ? 'Número de talla: sólo en el encabezado de cada hoja'
-      : handwrittenRegionMM
-        ? `Número de talla: encabezado + sobre el molde (se borra el número escrito a mano en x=${handwrittenRegionMM.x.toFixed(1)} y=${handwrittenRegionMM.y.toFixed(1)} ${handwrittenRegionMM.w.toFixed(1)}×${handwrittenRegionMM.h.toFixed(1)} mm y se escribe la talla correcta)`
-        : `Número de talla: encabezado + estampado en la esquina ${numbering.corner} del molde (${numbering.stampHeightMM} mm)`);
+    if (numberingFull.mode === 'hoja') lines.push('Número de talla: sólo en el encabezado de cada hoja');
+    else if (hasRegions) {
+      lines.push(`Número de talla: encabezado + re-enumeración de ${handwrittenRegionsMM.length} número(s) escrito(s) en el molde:`);
+      handwrittenRegionsMM.forEach((r, i) => lines.push(`   Nº ${i + 1}: x=${r.x.toFixed(1)} y=${r.y.toFixed(1)} ${r.w.toFixed(1)}×${r.h.toFixed(1)} mm · ${ANGLE_LABELS[r.angle]} → se borra y se escribe la talla de cada copia`));
+    } else lines.push(`Número de talla: encabezado + estampado en la esquina ${numbering.corner} del molde (${numbering.stampHeightMM} mm)`);
     lines.push('', `=== PAGINACIÓN (${PAPERS[print.paper].name}, margen ${print.marginMM} mm, solape ${print.overlapMM} mm) ===`);
     for (const l of layouts) lines.push(`Talla ${l.size}: ${l.moldeW.toFixed(1)}×${l.moldeH.toFixed(1)} mm → ${describeLayout(l)}`);
     lines.push(`TOTAL: ${nPages} hoja(s) en ${escalas.length} talla(s)`);
     return lines;
-  }, [baseBox, escalas, layouts, mode, tallaBase, tallaMenor, tallaMayor, numberingFull, handwrittenRegionMM, numbering, print, nPages]);
+  }, [baseBox, escalas, layouts, mode, tallaBase, tallaMenor, tallaMayor, numberingFull, handwrittenRegionsMM, hasRegions, numbering, print, nPages]);
 
   const fullLog = [...eventLog, ...(generated ? derivedLog : [])];
 
@@ -322,20 +363,12 @@ const App: React.FC = () => {
     if (numberingFull.mode === 'molde') {
       const text = String(e.size);
       ctx.fillStyle = '#000';
-      if (numberingFull.handwrittenRegionMM) {
-        const r = numberingFull.handwrittenRegionMM;
-        const sx = r.x * e.factorAncho * pxPerMM, sy = r.y * e.factorLargo * pxPerMM;
-        const sw = r.w * e.factorAncho * pxPerMM, sh = r.h * e.factorLargo * pxPerMM;
-        ctx.fillStyle = '#fff';
-        ctx.fillRect(sx - pxPerMM, sy - pxPerMM, sw + 2 * pxPerMM, sh + 2 * pxPerMM);
-        let px = sh * 0.85 / 0.716;
-        ctx.font = `bold ${px}px Helvetica, Arial, sans-serif`;
-        const tw = ctx.measureText(text).width;
-        if (tw > sw) { px *= sw / tw; ctx.font = `bold ${px}px Helvetica, Arial, sans-serif`; }
-        ctx.fillStyle = '#000';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(text, sx + sw / 2, sy + sh / 2);
+      if (numberingFull.handwrittenRegionsMM.length > 0) {
+        for (const r of numberingFull.handwrittenRegionsMM) {
+          const sx = r.x * e.factorAncho * pxPerMM, sy = r.y * e.factorLargo * pxPerMM;
+          const sw = r.w * e.factorAncho * pxPerMM, sh = r.h * e.factorLargo * pxPerMM;
+          drawRegionNumber(ctx, text, sx, sy, sw, sh, r.angle, pxPerMM);
+        }
       } else {
         const px = numberingFull.stampHeightMM * pxPerMM / 0.716;
         ctx.font = `bold ${px}px Helvetica, Arial, sans-serif`;
@@ -371,7 +404,7 @@ const App: React.FC = () => {
   };
 
   const reset = () => {
-    setImage(null); setFileName(''); setCropRect(null); setNumRect(null); setTool(null);
+    setImage(null); setFileName(''); setCropRect(null); setNumMarks([]); setTool(null);
     setGenerated(false); setEventLog([]); setMessage(null); setError(null); setRotated(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
@@ -379,20 +412,24 @@ const App: React.FC = () => {
   // Overlays del selector
   const overlays: OverlayRect[] = [];
   if (cropRect) overlays.push({ rect: cropRect, color: '#2563eb', label: baseBox ? `Molde ${baseBox.widthMM.toFixed(1)} × ${baseBox.heightMM.toFixed(1)} mm` : 'Molde' });
-  if (numRect) overlays.push({ rect: numRect, color: '#dc2626', label: 'Número escrito (se reemplaza)' });
+  numMarks.forEach((m, i) => overlays.push({ rect: m, color: '#dc2626', label: `Nº ${i + 1}` }));
 
   const onSelectRect = (r: PxRect) => {
     if (tool === 'crop') {
       setCropRect(r);
-      setNumRect(n => (n ? n : null));
       logEvent(`Recuadro ajustado a mano (px): x=${Math.round(r.x / (work?.scale || 1))}, y=${Math.round(r.y / (work?.scale || 1))}, w=${Math.round(r.w / (work?.scale || 1))}, h=${Math.round(r.h / (work?.scale || 1))}`);
       setTool(null);
     } else if (tool === 'number') {
-      setNumRect(r);
+      // Si el rectángulo es más alto que ancho, el número está girado
+      const angle: TextAngle = r.h > r.w * 1.25 ? 90 : 0;
+      setNumMarks(ms => [...ms, { ...r, angle }]);
       setNumbering(n => ({ ...n, mode: 'molde' }));
-      setTool(null);
+      // La herramienta sigue activa para marcar el siguiente número (uno por pieza)
     }
   };
+
+  const setMarkAngle = (i: number, angle: TextAngle) => setNumMarks(ms => ms.map((m, k) => (k === i ? { ...m, angle } : m)));
+  const removeMark = (i: number) => setNumMarks(ms => ms.filter((_, k) => k !== i));
 
   const paperName = (id: PaperSize) => PAPERS[id].name.split(' (')[0];
 
@@ -446,7 +483,7 @@ const App: React.FC = () => {
 
         {!image && (
           <div className="button-row">
-            <button className="secondary" onClick={cargarEjemplo} disabled={!!busy}>🧪 Probar con una imagen de ejemplo (molde talla 36 escaneado en Carta a 300 DPI)</button>
+            <button className="secondary" onClick={cargarEjemplo} disabled={!!busy}>🧪 Probar con una imagen de ejemplo (molde de 2 piezas, talla 36, Carta a 300 DPI)</button>
           </div>
         )}
 
@@ -471,15 +508,16 @@ const App: React.FC = () => {
                   ✏️ Ajustar recuadro del molde
                 </button>
                 <button className={`tool-btn red ${tool === 'number' ? 'active' : ''}`} onClick={() => setTool(tool === 'number' ? null : 'number')}>
-                  🔢 Marcar el número escrito a mano
+                  🔢 {tool === 'number' ? 'Listo (terminar de marcar)' : 'Marcar números a mano'}
                 </button>
-                {numRect && <button className="tool-btn" onClick={() => setNumRect(null)}>✖ Quitar marca del número</button>}
+                <button className="tool-btn red" onClick={detectarNumeros}>🔎 Detectar números automáticamente</button>
+                {numMarks.length > 0 && <button className="tool-btn" onClick={() => setNumMarks([])}>✖ Quitar todos ({numMarks.length})</button>}
               </div>
               {tool && (
                 <div className="warning-box" style={{ marginTop: 0 }}>
                   {tool === 'crop'
                     ? 'Arrastra sobre la imagen para dibujar el recuadro que contiene TODO el molde (equivale al grupo seleccionado en Corel). Los factores se calculan sobre este recuadro.'
-                    : 'Arrastra un rectángulo alrededor del número de talla escrito en el molde. En cada copia ese número se borrará y se escribirá la talla correcta en el mismo sitio.'}
+                    : 'Arrastra un rectángulo alrededor de CADA número de talla escrito en el molde (uno por pieza). Puedes marcar varios seguidos; al terminar pulsa "Listo". En cada copia esos números se borran y se escribe la talla nueva en el mismo sitio.'}
                 </div>
               )}
               <div className="preview-container selector-wrap">
@@ -529,7 +567,7 @@ const App: React.FC = () => {
                     <option value="hoja">Sólo en el encabezado de cada hoja</option>
                   </select>
                 </div>
-                {numbering.mode === 'molde' && !handwrittenRegionMM && (
+                {numbering.mode === 'molde' && !hasRegions && (
                   <>
                     <div className="form-group">
                       <label>Posición sobre el molde</label>
@@ -549,14 +587,32 @@ const App: React.FC = () => {
                 )}
               </div>
               {numbering.mode === 'molde' && (
-                <div className="hint" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                  {handwrittenRegionMM && numRect && work && <RegionThumb source={work.canvas} rect={numRect} />}
-                  <div>
-                    {handwrittenRegionMM
-                      ? <>✅ Número marcado: en cada talla se borra el número escrito a mano y se escribe la talla correcta en ese mismo lugar ({handwrittenRegionMM.w.toFixed(0)} × {handwrittenRegionMM.h.toFixed(0)} mm). Verifica que la talla base coincida con lo que está escrito.</>
-                      : <>💡 Para que el número quede DENTRO del molde (y el número escrito a mano no se repita en todas las tallas), usa “Marcar el número escrito a mano”.</>}
+                hasRegions ? (
+                  <div className="hint">
+                    <div style={{ marginBottom: 8 }}>
+                      ✅ <b>Re-enumeración automática:</b> en cada talla se borran estos {numMarks.length} número(s) y se escribe la talla nueva en el mismo lugar de cada pieza. Verifica que la talla base coincida con lo que está escrito.
+                    </div>
+                    <div className="marks-list">
+                      {numMarks.map((m, i) => (
+                        <div key={i} className="mark-item">
+                          {work && <RegionThumb source={work.canvas} rect={m} />}
+                          <div className="mark-info">
+                            <b>Nº {i + 1}</b> · {(m.w * mmPerPxWork).toFixed(0)} × {(m.h * mmPerPxWork).toFixed(0)} mm
+                            <select value={m.angle} onChange={e => setMarkAngle(i, parseInt(e.target.value) as TextAngle)}>
+                              {([0, 90, 180, 270] as TextAngle[]).map(a => <option key={a} value={a}>{ANGLE_LABELS[a]}</option>)}
+                            </select>
+                          </div>
+                          <button className="small secondary" onClick={() => removeMark(i)} title="Quitar">✖</button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="hint">
+                    💡 No hay números marcados: la talla se estampará en una esquina del recuadro y los números escritos en el molde se repetirían en todas las tallas.
+                    Usa <b>“Detectar números automáticamente”</b> o <b>“Marcar números a mano”</b> (uno por pieza) para que se borren y se re-enumeren.
+                  </div>
+                )
               )}
 
               <div className="button-row">

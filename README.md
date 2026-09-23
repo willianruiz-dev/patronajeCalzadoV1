@@ -20,9 +20,10 @@ imprimir**.
 3. **Enumeración automática**:
    - Cada hoja lleva en grande `TALLA 38`, `Hoja 2 de 4 (fila 1 / columna 2)`, un
      mini-mapa de la cuadrícula de hojas y los factores usados.
-   - El número también se estampa sobre el molde (esquina configurable), o mejor:
-     **marca el número escrito a mano** en el molde base y en cada copia se borra y se
-     escribe la talla correcta en ese mismo lugar (escalado con el molde).
+   - **Re-enumeración de todas las piezas**: los números de talla escritos en el molde
+     base se detectan solos (o se marcan a mano, uno por pieza, incluso girados 90°) y en
+     cada copia se borran y se escribe la talla nueva en el mismo lugar de cada pieza.
+     Si no hay números marcados, la talla se estampa en una esquina del molde.
 4. **Una talla por hoja, en papel real**: Carta, Oficio, A4, A3, Doble carta o
    "plotter" (hoja a medida). Orientación automática (la que use menos hojas).
    Si una talla no cabe, se divide en varias hojas con **solape** y **cruces de registro**

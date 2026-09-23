@@ -436,3 +436,33 @@ pre.log {
   overflow-y: auto;
   white-space: pre-wrap;
 }
+
+.marks-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mark-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.mark-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #334155;
+}
+
+.mark-info select {
+  padding: 4px 6px;
+  font-size: 12px;
+  width: auto;
+}

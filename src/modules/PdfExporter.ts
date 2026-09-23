@@ -25,27 +25,38 @@ import { FOOTER_MM, HEADER_MM, Rect, SizeLayout, Tile } from './PageLayout';
 export type NumberingMode = 'molde' | 'hoja';
 export type StampCorner = 'arriba-izq' | 'arriba-der' | 'abajo-izq' | 'abajo-der';
 
+export type TextAngle = 0 | 90 | 180 | 270;
+
+/**
+ * Región de un número escrito a mano en el molde BASE, en mm relativos a la
+ * esquina superior izquierda del recuadro del molde. `angle` es la
+ * orientación del texto (grados en sentido antihorario; 90 = se lee de abajo
+ * hacia arriba).
+ */
+export interface NumberRegion extends Rect {
+  angle: TextAngle;
+}
+
 export interface NumberingSettings {
   /** 'molde': encabezado + número sobre el molde. 'hoja': sólo encabezado. */
   mode: NumberingMode;
-  /** Esquina del recuadro del molde donde estampar el número si no hay región marcada. */
+  /** Esquina del recuadro del molde donde estampar el número si no hay regiones marcadas. */
   corner: StampCorner;
-  /** Altura del número estampado (mm) cuando no hay región marcada. */
+  /** Altura del número estampado (mm) cuando no hay regiones marcadas. */
   stampHeightMM: number;
   /**
-   * Región del número escrito a mano en el molde BASE, en mm relativos a la
-   * esquina superior izquierda del recuadro del molde. Si existe, se borra
-   * (rectángulo blanco) y se escribe la talla correcta en ese mismo lugar,
-   * escalado junto con el molde.
+   * Números escritos a mano en el molde base (uno por pieza, los que haga
+   * falta). Cada uno se borra (rectángulo blanco) y se escribe la talla
+   * correcta en ese mismo lugar, escalado junto con el molde.
    */
-  handwrittenRegionMM?: Rect | null;
+  handwrittenRegionsMM: NumberRegion[];
 }
 
 export const DEFAULT_NUMBERING: NumberingSettings = {
   mode: 'molde',
   corner: 'arriba-izq',
   stampHeightMM: 10,
-  handwrittenRegionMM: null,
+  handwrittenRegionsMM: [],
 };
 
 export interface ExportJob {
@@ -105,6 +116,40 @@ function stampText(
   }
   doc.setTextColor(0, 0, 0);
   doc.text(text, cx, baseline, { align: 'center', renderingMode: 'fill' });
+}
+
+/**
+ * Igual que stampText pero con el texto girado `angle` grados (antihorario),
+ * centrado en (cx, cy). Sin halo (se usa sobre un rectángulo blanco).
+ */
+function stampTextRotated(
+  doc: jsPDF,
+  text: string,
+  cx: number,
+  cy: number,
+  capMM: number,
+  maxWidthMM: number,
+  angle: TextAngle,
+): void {
+  doc.setFont('helvetica', 'bold');
+  let pt = fontSizePtForCapHeight(capMM);
+  doc.setFontSize(pt);
+  let tw = doc.getTextWidth(text);
+  if (maxWidthMM > 0 && tw > maxWidthMM) {
+    const f = maxWidthMM / tw;
+    pt *= f;
+    capMM *= f;
+    doc.setFontSize(pt);
+    tw = doc.getTextWidth(text);
+  }
+  const th = (angle * Math.PI) / 180;
+  // u = dirección de escritura, v = "arriba" del texto (coords de página, y hacia abajo)
+  const ux = Math.cos(th), uy = -Math.sin(th);
+  const vx = -Math.sin(th), vy = -Math.cos(th);
+  const sx = cx - vx * (capMM / 2) - ux * (tw / 2);
+  const sy = cy - vy * (capMM / 2) - uy * (tw / 2);
+  doc.setTextColor(0, 0, 0);
+  doc.text(text, sx, sy, { angle, renderingMode: 'fill' });
 }
 
 function drawCross(doc: jsPDF, x: number, y: number): void {
@@ -240,18 +285,21 @@ function drawStamp(doc: jsPDF, job: ExportJob, layout: SizeLayout, escala: Scale
   if (num.mode !== 'molde') return;
   const text = String(layout.size);
 
-  if (num.handwrittenRegionMM) {
-    const r = num.handwrittenRegionMM;
-    // Escalamos la región junto con el molde (mismo Stretch)
-    const sx = r.x * escala.factorAncho;
-    const sy = r.y * escala.factorLargo;
-    const sw = r.w * escala.factorAncho;
-    const sh = r.h * escala.factorLargo;
-    const pad = 1.0;
-    doc.setFillColor(255, 255, 255);
-    doc.rect(ox + sx - pad, oy + sy - pad, sw + 2 * pad, sh + 2 * pad, 'F');
-    const capMM = Math.max(3, Math.min(sh * 0.85, sh));
-    stampText(doc, text, ox + sx + sw / 2, oy + sy + sh / 2, capMM, sw * 0.95 + 2 * pad, false);
+  if (num.handwrittenRegionsMM.length > 0) {
+    for (const r of num.handwrittenRegionsMM) {
+      // Escalamos la región junto con el molde (mismo Stretch)
+      const sx = r.x * escala.factorAncho;
+      const sy = r.y * escala.factorLargo;
+      const sw = r.w * escala.factorAncho;
+      const sh = r.h * escala.factorLargo;
+      const pad = 1.0;
+      doc.setFillColor(255, 255, 255);
+      doc.rect(ox + sx - pad, oy + sy - pad, sw + 2 * pad, sh + 2 * pad, 'F');
+      const vertical = r.angle === 90 || r.angle === 270;
+      const capMM = Math.max(3, (vertical ? sw : sh) * 0.85);
+      const maxW = (vertical ? sh : sw) * 0.95 + 2 * pad;
+      stampTextRotated(doc, text, ox + sx + sw / 2, oy + sy + sh / 2, capMM, maxW, r.angle);
+    }
     return;
   }
 

@@ -1,7 +1,37 @@
 import React, { useEffect, useRef } from 'react';
 import { ScaleResult } from '../modules/CorelStyleScaler';
-import { Rect, SizeLayout, describeLayout } from '../modules/PageLayout';
-import { NumberingSettings } from '../modules/PdfExporter';
+import { SizeLayout, describeLayout } from '../modules/PageLayout';
+import { NumberingSettings, TextAngle } from '../modules/PdfExporter';
+
+/**
+ * Borra una región (rectángulo blanco) y escribe el número centrado, girado
+ * `angle` grados antihorario. Coordenadas en píxeles del canvas destino.
+ */
+export function drawRegionNumber(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  sx: number, sy: number, sw: number, sh: number,
+  angle: TextAngle,
+  padPx: number,
+): void {
+  ctx.save();
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(sx - padPx, sy - padPx, sw + 2 * padPx, sh + 2 * padPx);
+  const vertical = angle === 90 || angle === 270;
+  const capPx = (vertical ? sw : sh) * 0.85;
+  const maxW = (vertical ? sh : sw) * 0.95 + 2 * padPx;
+  let px = capPx / 0.716;
+  ctx.font = `bold ${px}px Helvetica, Arial, sans-serif`;
+  const tw = ctx.measureText(text).width;
+  if (tw > maxW) { px *= maxW / tw; ctx.font = `bold ${px}px Helvetica, Arial, sans-serif`; }
+  ctx.translate(sx + sw / 2, sy + sh / 2);
+  ctx.rotate(-(angle * Math.PI) / 180);
+  ctx.fillStyle = '#000';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 0, 0);
+  ctx.restore();
+}
 
 interface Props {
   crop: HTMLCanvasElement;
@@ -39,20 +69,12 @@ const SizePreview: React.FC<Props> = ({ crop, escala, layout, numbering, maxW = 
     if (numbering.mode === 'molde') {
       const text = String(layout.size);
       ctx.save();
-      const r: Rect | null | undefined = numbering.handwrittenRegionMM;
-      if (r) {
-        const sx = r.x * escala.factorAncho * k, sy = r.y * escala.factorLargo * k;
-        const sw = r.w * escala.factorAncho * k, sh = r.h * escala.factorLargo * k;
-        ctx.fillStyle = '#fff';
-        ctx.fillRect(sx - 2, sy - 2, sw + 4, sh + 4);
-        let px = sh * 0.85 / 0.716;
-        ctx.font = `bold ${px}px Helvetica, Arial, sans-serif`;
-        const tw = ctx.measureText(text).width;
-        if (tw > sw) { px *= sw / tw; ctx.font = `bold ${px}px Helvetica, Arial, sans-serif`; }
-        ctx.fillStyle = '#000';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(text, sx + sw / 2, sy + sh / 2);
+      if (numbering.handwrittenRegionsMM.length > 0) {
+        for (const r of numbering.handwrittenRegionsMM) {
+          const sx = r.x * escala.factorAncho * k, sy = r.y * escala.factorLargo * k;
+          const sw = r.w * escala.factorAncho * k, sh = r.h * escala.factorLargo * k;
+          drawRegionNumber(ctx, text, sx, sy, sw, sh, r.angle, 2);
+        }
       } else {
         const hmm = Math.max(3, numbering.stampHeightMM);
         const px = hmm * k / 0.716;

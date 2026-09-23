@@ -289,3 +289,173 @@ export function detectarBoundingBoxTinta(
   const bboxH = Math.min(h - y, maxY - minY + 1 + padPx * 2);
   return { bbox: { x, y, w: bboxW, h: bboxH }, threshold, trimmed };
 }
+
+// ---------------------------------------------------------------------------
+// Detección automática de los números de talla escritos en el molde
+// ---------------------------------------------------------------------------
+
+export interface NumberCandidate extends PxRect {
+  /** 0 = texto horizontal; 90 = texto girado (se lee de abajo hacia arriba). */
+  angle: 0 | 90;
+}
+
+interface Component {
+  x: number; y: number; w: number; h: number; area: number;
+}
+
+/**
+ * Busca, dentro del recuadro del molde, grupos de DOS trazos pequeños del
+ * tamaño de un dígito, alineados y pegados entre sí: eso es una talla ("36").
+ * Devuelve las regiones (en px de `imgData`) para borrarlas y re-enumerarlas.
+ *
+ * Heurísticas (sin OCR):
+ *   - Un dígito mide entre 2.5 y 25 mm y es un trazo (no un relleno sólido).
+ *   - Dos dígitos de una talla tienen alturas parecidas, se solapan en su eje
+ *     y la separación entre ellos es menor que un dígito.
+ *   - Si hay un tercer trazo similar a continuación es una palabra
+ *     ("TALON", "PUNTA"), no una talla: se descarta.
+ *   - También se aceptan trazos únicos con proporción de dos dígitos unidos.
+ */
+export function detectarNumerosEscritos(imgData: ImageData, crop: PxRect, mmPerPx: number): NumberCandidate[] {
+  const W = imgData.width, d = imgData.data;
+  const x0 = Math.max(0, Math.floor(crop.x)), y0 = Math.max(0, Math.floor(crop.y));
+  const x1 = Math.min(W, Math.ceil(crop.x + crop.w)), y1 = Math.min(imgData.height, Math.ceil(crop.y + crop.h));
+  const cw = x1 - x0, ch = y1 - y0;
+  if (cw <= 0 || ch <= 0) return [];
+
+  // Gris + umbral relativo al papel (igual criterio que el recuadro)
+  const gray = new Uint8Array(cw * ch);
+  const hist = new Uint32Array(256);
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) {
+      const p = ((y + y0) * W + (x + x0)) * 4;
+      const g = (0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2]) | 0;
+      gray[y * cw + x] = g;
+      hist[g]++;
+    }
+  }
+  let paper = 0, pc = -1;
+  for (let g = 0; g < 256; g++) if (hist[g] > pc) { pc = hist[g]; paper = g; }
+  const threshold = Math.min(190, Math.max(90, paper >= 150 ? paper - 55 : otsuThreshold(hist, cw * ch)));
+
+  const minDigit = 2.5 / mmPerPx;
+  const maxDigit = 25 / mmPerPx;
+
+  // Componentes conexas (8 vecinos)
+  const visited = new Uint8Array(cw * ch);
+  const stack = new Int32Array(cw * ch);
+  const comps: Component[] = [];
+  for (let start = 0; start < gray.length; start++) {
+    if (visited[start] || gray[start] >= threshold) continue;
+    let sp = 0;
+    stack[sp++] = start;
+    visited[start] = 1;
+    let minX = cw, minY = ch, maxX = -1, maxY = -1, area = 0;
+    while (sp > 0) {
+      const i = stack[--sp];
+      const x = i % cw, y = (i - x) / cw;
+      area++;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= ch) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= cw || (!dx && !dy)) continue;
+          const j = ny * cw + nx;
+          if (!visited[j] && gray[j] < threshold) { visited[j] = 1; stack[sp++] = j; }
+        }
+      }
+    }
+    const bw = maxX - minX + 1, bh = maxY - minY + 1;
+    const big = Math.max(bw, bh), small = Math.min(bw, bh);
+    if (big < minDigit || big > maxDigit * 2.2) continue;   // ni polvo ni contornos
+    if (small < minDigit * 0.3) continue;                    // rayitas
+    const fill = area / (bw * bh);
+    if (fill < 0.06 || fill > 0.7) continue;                 // ni ruido ni manchas sólidas
+    comps.push({ x: minX, y: minY, w: bw, h: bh, area });
+  }
+
+  const digitLike = comps.filter(c => Math.max(c.w, c.h) <= maxDigit);
+  const used = new Set<Component>();
+  const candidates: NumberCandidate[] = [];
+
+  const similar = (a: number, b: number) => { const r = a / b; return r > 0.6 && r < 1.66; };
+  const overlap1D = (a0: number, a1: number, b0: number, b1: number) => Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
+
+  // Vecino "siguiente" en la dirección de lectura
+  const nextRight = (a: Component, pool: Component[]) => {
+    let best: Component | null = null, bestGap = Infinity;
+    for (const b of pool) {
+      if (b === a || !similar(a.h, b.h)) continue;
+      if (overlap1D(a.y, a.y + a.h, b.y, b.y + b.h) < 0.5 * Math.min(a.h, b.h)) continue;
+      const gap = b.x - (a.x + a.w);
+      const hm = Math.max(a.h, b.h);
+      if (gap < -0.15 * hm || gap > 0.9 * hm) continue;
+      if (gap < bestGap) { bestGap = gap; best = b; }
+    }
+    return best;
+  };
+  const nextUp = (a: Component, pool: Component[]) => { // texto girado 90°: el segundo dígito está ARRIBA del primero
+    let best: Component | null = null, bestGap = Infinity;
+    for (const b of pool) {
+      if (b === a || !similar(a.w, b.w)) continue;
+      if (overlap1D(a.x, a.x + a.w, b.x, b.x + b.w) < 0.5 * Math.min(a.w, b.w)) continue;
+      const gap = a.y - (b.y + b.h);
+      const wm = Math.max(a.w, b.w);
+      if (gap < -0.15 * wm || gap > 0.9 * wm) continue;
+      if (gap < bestGap) { bestGap = gap; best = b; }
+    }
+    return best;
+  };
+  const prevOf = (a: Component, pool: Component[], next: (c: Component, p: Component[]) => Component | null) =>
+    pool.find(c => c !== a && next(c, pool) === a) || null;
+
+  for (const dir of ['h', 'v'] as const) {
+    const next = dir === 'h' ? nextRight : nextUp;
+    for (const a of digitLike) {
+      if (used.has(a)) continue;
+      const b = next(a, digitLike);
+      if (!b || used.has(b)) continue;
+      // Debe ser exactamente un par: ni un tercero después ni uno antes.
+      const c = next(b, digitLike);
+      if (c && !used.has(c)) continue;
+      if (prevOf(a, digitLike, next)) continue;
+      used.add(a); used.add(b);
+      const minX = Math.min(a.x, b.x), minY = Math.min(a.y, b.y);
+      const maxX = Math.max(a.x + a.w, b.x + b.w), maxY = Math.max(a.y + a.h, b.y + b.h);
+      const pad = Math.round(0.12 * Math.max(maxX - minX, maxY - minY));
+      candidates.push({ x: x0 + minX - pad, y: y0 + minY - pad, w: maxX - minX + 2 * pad, h: maxY - minY + 2 * pad, angle: dir === 'h' ? 0 : 90 });
+    }
+  }
+
+  // Trazos únicos con forma de "dos dígitos unidos" (p. ej. un "36" escrito a
+  // mano sin levantar el lápiz). Debe estar AISLADO: las letras de una palabra
+  // también tienen esa forma pero siempre tienen vecinas cerca.
+  const isolated = (c: Component) => {
+    const cx = c.x + c.w / 2, cy = c.y + c.h / 2, reach = 1.5 * Math.max(c.w, c.h);
+    return !comps.some(o => o !== c && Math.abs(o.x + o.w / 2 - cx) < reach && Math.abs(o.y + o.h / 2 - cy) < reach);
+  };
+  for (const c of comps) {
+    if (used.has(c)) continue;
+    const r = c.w / c.h;
+    let angle: 0 | 90 | null = null;
+    if (r >= 1.15 && r <= 2.2 && c.h <= maxDigit) angle = 0;
+    else if (r <= 1 / 1.15 && r >= 1 / 2.2 && c.w <= maxDigit) angle = 90;
+    if (angle === null) continue;
+    const fill = c.area / (c.w * c.h);
+    if (fill > 0.45 || fill < 0.12) continue;
+    if (!isolated(c)) continue;
+    const pad = Math.round(0.12 * Math.max(c.w, c.h));
+    candidates.push({ x: x0 + c.x - pad, y: y0 + c.y - pad, w: c.w + 2 * pad, h: c.h + 2 * pad, angle });
+  }
+
+  // De mayor a menor tamaño, máximo 12
+  candidates.sort((p, q) => q.w * q.h - p.w * p.h);
+  return candidates.slice(0, 12).map(c => ({
+    x: Math.max(0, c.x), y: Math.max(0, c.y),
+    w: Math.min(W - Math.max(0, c.x), c.w), h: Math.min(imgData.height - Math.max(0, c.y), c.h),
+    angle: c.angle,
+  }));
+}
