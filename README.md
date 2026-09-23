@@ -1,10 +1,10 @@
 # 👞 Escalado de Calzado (estilo CorelDRAW) — versión web
 
 SPA 100 % estática (sin backend) que replica la macro de CorelDRAW `EscalarCalzado`:
-se carga el escaneo, se toma el **grupo de moldes** (el recuadro de las piezas) como
-base de la escala, se generan las tallas con `Stretch(factorAncho, factorLargo)`
-sobre ese grupo y **cada talla sale enumerada en su propia hoja**. El papel de la
-impresora no crece.
+se carga el escaneo de la **hoja completa** (Carta, Tabloide…), se usa ese tamaño
+como regla de la escala (igual que al seleccionar todo el bitmap en Corel) y se
+estiran los moldes. El recuadro de las piezas solo recorta qué se imprime.
+Cada talla sale enumerada en su propia hoja. El papel de la impresora no crece.
 
 ## Qué hace
 
@@ -15,9 +15,9 @@ impresora no crece.
    - Molde: `+3.33 mm` de ancho y `+6.67 mm` de largo por talla.
    - Plantilla: `+4.18 mm` de ancho y `+8.34 mm` de largo por talla.
    - `factorAncho = (hojaAncho + incAncho × dif) / hojaAncho`, `factorLargo = (hojaLargo + incLargo × dif) / hojaLargo`.
-     La **regla** es el recuadro del **grupo de moldes** (todas las piezas juntas), no la hoja
-     en blanco. **El papel no crece**: se estira ese grupo y se imprime en Carta/Tabloide.
-     Un talón suelto no debe ser la base: hay que escanear el molde completo.
+     La **regla** es el tamaño de la **hoja completa** del escáner (Carta, Tabloide…), no el
+     recuadro del molde. **El papel no crece**: el factor se aplica a los moldes. Un molde
+     de 161 × 224 mm en Carta crece su parte (~2.5 × 5.3 mm/talla), no 3.33 × 6.67.
    - El log es el mismo de la macro (ANTES / DESPUES / Δ mm por talla).
 3. **Enumeración automática**:
    - Cada hoja lleva en grande `TALLA 38`, `Hoja 2 de 4 (fila 1 / columna 2)`, un
