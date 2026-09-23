@@ -1,12 +1,36 @@
 import Decimal from 'decimal.js';
 
-export type PaperSize = 'carta' | 'oficio' | 'a4';
+/**
+ * Tamaños de papel soportados para IMPRIMIR el resultado.
+ * Dimensiones en mm en orientación VERTICAL (retrato). La orientación
+ * horizontal se obtiene intercambiando ancho/alto.
+ *
+ * 'plotter' = hoja a medida (una hoja por talla del tamaño exacto del molde),
+ * pensada para plotters/rollo continuo.
+ */
+export type PaperSize = 'carta' | 'oficio' | 'a4' | 'a3' | 'tabloide' | 'plotter';
 
-// Dimensiones en milímetros (ancho x alto) en orientación horizontal
-export const PAPER_DIMENSIONS_MM: Record<PaperSize, { width: number; height: number }> = {
-  carta: { width: 279.4, height: 215.9 },   // Carta US: 11" x 8.5"
-  oficio: { width: 355.6, height: 215.9 },  // Oficio/Legal: 14" x 8.5"
-  a4: { width: 297, height: 210 },          // A4: 297mm x 210mm
+export interface PaperSpec {
+  id: PaperSize;
+  name: string;
+  widthMM: number;
+  heightMM: number;
+}
+
+export const PAPERS: Record<PaperSize, PaperSpec> = {
+  carta:    { id: 'carta',    name: 'Carta (21.6 × 27.9 cm)',        widthMM: 215.9, heightMM: 279.4 },
+  oficio:   { id: 'oficio',   name: 'Oficio / Legal (21.6 × 35.6 cm)', widthMM: 215.9, heightMM: 355.6 },
+  a4:       { id: 'a4',       name: 'A4 (21.0 × 29.7 cm)',           widthMM: 210,   heightMM: 297 },
+  a3:       { id: 'a3',       name: 'A3 (29.7 × 42.0 cm)',           widthMM: 297,   heightMM: 420 },
+  tabloide: { id: 'tabloide', name: 'Doble carta / Tabloide (27.9 × 43.2 cm)', widthMM: 279.4, heightMM: 431.8 },
+  plotter:  { id: 'plotter',  name: 'Plotter / rollo (hoja a medida por talla)', widthMM: 0, heightMM: 0 },
+};
+
+/** Compatibilidad: dimensiones en horizontal de los papeles clásicos. */
+export const PAPER_DIMENSIONS_MM: Record<'carta' | 'oficio' | 'a4', { width: number; height: number }> = {
+  carta: { width: 279.4, height: 215.9 },
+  oficio: { width: 355.6, height: 215.9 },
+  a4: { width: 297, height: 210 },
 };
 
 export type DPI = 300 | 600;
@@ -48,7 +72,7 @@ export function mmToPixels(mm: number, dpi: DPI): Decimal {
 export function validateImageSize(
   imageWidthPx: number,
   imageHeightPx: number,
-  paperSize: PaperSize,
+  paperSize: 'carta' | 'oficio' | 'a4',
   dpi: DPI
 ): { valid: boolean; message: string } {
   const paper = PAPER_DIMENSIONS_MM[paperSize];

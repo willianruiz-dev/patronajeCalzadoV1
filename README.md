@@ -1,82 +1,74 @@
-# 👞 Patronaje Calzado V1 - Digitalización de Moldes
+# 👞 Escalado de Calzado (estilo CorelDRAW) — versión web
 
-SPA 100% estática (sin backend) para digitalizar moldes de calzado dibujados en papel, extraer sus contornos y generar tallas superiores/inferiores mediante el sistema **Punto Francés** con escalado proporcional global.
+SPA 100 % estática (sin backend) que replica la macro de CorelDRAW `EscalarCalzado`:
+se carga el escaneo del molde, se detecta el recuadro del molde (el "grupo" que
+seleccionarías en Corel), se generan las tallas con `Stretch(factorAncho, factorLargo)`
+sobre el molde completo y **cada talla sale enumerada y en su propia hoja lista para
+imprimir**.
 
-## 🎯 Regla de Oro Implementada
-El escalado es **PROPORCIONAL GLOBAL**. Nunca se suman milímetros directamente a piezas individuales. Se usan factores multiplicativos basados en la longitud y ancho teórico de la horma:
+## Qué hace
 
-- `FactorGlobalX = LongitudHorma(TallaDestino) / LongitudHorma(TallaBase)`
-- `FactorGlobalY = AnchoHorma(TallaDestino) / AnchoHorma(TallaBase)`
+1. **Carga y detección**: sube el JPG/PNG del escaneo (300 o 600 DPI). El recuadro del
+   molde se detecta solo, ignorando los bordes negros/sombras del escáner y el polvo.
+   Puedes ajustarlo arrastrando sobre la imagen o rotar la imagen 90°.
+2. **Escalado (igual que la macro)**:
+   - Molde: `+3.33 mm` de ancho y `+6.67 mm` de largo por talla.
+   - Plantilla: `+4.18 mm` de ancho y `+8.34 mm` de largo por talla.
+   - `factorAncho = (ancho + incAncho × dif) / ancho`, `factorLargo = (alto + incLargo × dif) / alto`,
+     aplicados al recuadro completo del molde (Stretch), nunca sumando mm a piezas sueltas.
+   - El log es el mismo de la macro (ANTES / DESPUES / Δ mm por talla).
+3. **Enumeración automática**:
+   - Cada hoja lleva en grande `TALLA 38`, `Hoja 2 de 4 (fila 1 / columna 2)`, un
+     mini-mapa de la cuadrícula de hojas y los factores usados.
+   - El número también se estampa sobre el molde (esquina configurable), o mejor:
+     **marca el número escrito a mano** en el molde base y en cada copia se borra y se
+     escribe la talla correcta en ese mismo lugar (escalado con el molde).
+4. **Una talla por hoja, en papel real**: Carta, Oficio, A4, A3, Doble carta o
+   "plotter" (hoja a medida). Orientación automática (la que use menos hojas).
+   Si una talla no cabe, se divide en varias hojas con **solape** y **cruces de registro**
+   (mismas coordenadas del molde en las dos hojas vecinas) e instrucciones de montaje.
+   Cada hoja incluye una **barra de control de 100 mm** para comprobar que la impresora
+   no re-escaló (imprimir siempre al 100 %, sin "ajustar a la página").
+5. **Exportación**:
+   - `Descargar PDF para imprimir`: un PDF multipágina, cada talla en su(s) hoja(s).
+   - `PDF` por talla (archivo separado) y `PNG` por talla a la resolución del escaneo.
+   - `PDF plotter`: todas las tallas en fila en una sola hoja a medida (comportamiento de
+     la macro; sólo para plotter/rollo).
+   - Log en texto plano.
 
-Cada punto (x,y) de cada pieza se multiplica por estos factores: las piezas pequeñas crecen poco, las grandes mucho, manteniendo la relación de aspecto perfecta.
+## Ejecutar
 
-## 📊 Constantes del Punto Francés
-- Incremento longitudinal por talla: **6.67 mm** (eje X: talón → punta)
-- Incremento transversal por talla: **4.5 mm** (eje Y: suela → empeine)
-- Margen funcional de horma: **15 mm**
+```bash
+npm install
+npm run dev      # http://localhost:5173
+npm run build    # producción en dist/
+```
 
-## 🛠️ Stack Tecnológico
-- **Framework**: React 18 + TypeScript + Vite
-- **Procesamiento de imagen**: Canvas API Nativa (binarización/thresholding)
-- **Detección de contornos**: Flood Fill / Componentes Conectados nativo
-- **Precisión matemática**: decimal.js
-- **Exportación**: DXF (R12 nativo) + PDF (jsPDF)
-- **Nesting**: Algoritmo Shelf Packing (Bin Packing)
+Hay un botón **"Probar con una imagen de ejemplo"** (molde talla 36, Carta a 300 DPI) para
+ver el flujo completo sin escanear nada.
 
-## 🚀 Flujo de Trabajo de la Aplicación
+## Estructura
 
-### Pantalla 1: Configuración de Escaneo
-- Selecciona tamaño de papel: Carta / Oficio / A4
-- Selecciona DPI (300 / 600)
-- Ingresa talla base del dibujo
-- Sube la imagen (drag & drop o clic)
-- Indicador visual de orientación: ← TALÓN | PUNTA →
-- Botón "Rotar 90°" por si escaneaste mal
-
-### Pantalla 2: Detección de Piezas
-- Binariza la imagen automáticamente (blanco/negro)
-- Detecta TODOS los contornos cerrados usando flood fill
-- Muestra cada pieza detectada con su orientación
-- Ingresa talla destino
-- Muestra los factores globales de escalado calculados
-
-### Pantalla 3: Escalado y Reacomodo (Nesting)
-- Aplica el escalado proporcional a TODAS las piezas simultáneamente
-- Reacomoda automáticamente las piezas escaladas en una nueva hoja usando Bin Packing
-- Añade márgenes de corte de 10mm
-- Validación visual: superpone pieza original (negro) y escalada (azul semitransparente)
-- Exporta a **DXF** (para cortadora/plotter) o **PDF** (para imprimir)
-
-## 📁 Estructura del Código
 ```
 src/
 ├── modules/
-│   ├── colombianLasts.ts     # Tabla de tallas estándar Colombia (niños/mujeres/hombres)
-│   ├── ScannerConfig.ts      # Cálculo mm/pixel, validación de papel/DPI
-│   ├── PieceExtractor.ts     # Binarización, flood fill, extracción de contornos
-│   ├── ProportionalScaler.ts # LÓGICA MATEMÁTICA DEL ESCALADO PROPORCIONAL
-│   ├── AutoNester.ts         # Algoritmo Shelf Packing para reacomodo
-│   └── Exporter.ts           # Exportación DXF/PDF
-├── App.tsx                   # Interfaz de usuario (3 pantallas)
-├── main.tsx
+│   ├── CorelStyleScaler.ts   # Factores de la macro (molde/plantilla) y lista de tallas
+│   ├── ImageLoader.ts        # Carga, rotación, recorte, blanqueo y detección robusta del recuadro
+│   ├── PageLayout.ts         # Paginación: hojas por talla, mosaico con solape, orientación automática
+│   ├── PdfExporter.ts        # PDF multipágina (jsPDF): encabezados, número sobre el molde, cruces, barra 100 mm
+│   ├── ScannerConfig.ts      # DPI → mm/px y tamaños de papel
+│   └── colombianLasts.ts     # Tabla de referencia de tallas (Colombia)
+├── components/
+│   ├── RectSelector.tsx      # Dibujar/ajustar rectángulos sobre la imagen (recuadro y número)
+│   └── SizePreview.tsx       # Vista previa de cada talla con su reparto en hojas
+├── App.tsx                   # Flujo: cargar → recuadro/talla/numeración → resultado e impresión
 └── index.css
 ```
 
-## ▶️ Ejecutar
-```bash
-npm install
-npm run dev      # Servidor desarrollo en http://localhost:5173
-npm run build    # Compilar para producción (carpeta dist/)
-```
+## Notas de precisión
 
-## 📐 Datos Estándar Colombia
-- Niños: tallas 20–35
-- Mujeres: tallas 35–41
-- Hombres: tallas 39–44
-
-## ✅ Características Clave
-- 100% en el navegador: sin servidores, sin costos, sin latencia
-- Precisión industrial: decimal.js + cálculo nativo por DPI = error < 0.1mm
-- Orientación fija: X = Longitud, Y = Altura (sin ambigüedad)
-- No deforma piezas pequeñas: escalado multiplicativo global, NO suma de mm
-- Exportación lista para imprimir/cortar
+- `mmPorPixel = 25.4 / DPI`; con 300 DPI el error es < 0.1 mm.
+- El eje LARGO del molde (talón → punta, +6.67 mm/talla) es el eje **vertical** de la
+  imagen; si el molde está acostado, usa "Rotar 90°".
+- La imagen del molde se incrusta una sola vez en el PDF y se dibuja en cada hoja con el
+  Stretch de su talla, así el archivo pesa poco aunque tenga muchas hojas.
