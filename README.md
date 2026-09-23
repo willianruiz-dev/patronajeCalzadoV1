@@ -14,8 +14,11 @@ imprimir**.
 2. **Escalado (igual que la macro)**:
    - Molde: `+3.33 mm` de ancho y `+6.67 mm` de largo por talla.
    - Plantilla: `+4.18 mm` de ancho y `+8.34 mm` de largo por talla.
-   - `factorAncho = (ancho + incAncho × dif) / ancho`, `factorLargo = (alto + incLargo × dif) / alto`,
-     aplicados al recuadro completo del molde (Stretch), nunca sumando mm a piezas sueltas.
+   - `factorAncho = (refAncho + incAncho × dif) / refAncho`, `factorLargo = (refLargo + incLargo × dif) / refLargo`,
+     donde la **referencia** son las medidas del molde completo: por defecto la hoja escaneada
+     completa (o medidas manuales del molde completo). Los factores se aplican a lo escaneado
+     (Stretch), así una pieza suelta (talón, puntera…) crece en la misma proporción que el
+     molde entero y nunca se le suman los mm directamente.
    - El log es el mismo de la macro (ANTES / DESPUES / Δ mm por talla).
 3. **Enumeración automática**:
    - Cada hoja lleva en grande `TALLA 38`, `Hoja 2 de 4 (fila 1 / columna 2)`, un

@@ -14,6 +14,18 @@
  *   factorLargo = (baseHeight + incLargoMM * diferenciaTallas) / baseHeight
  *
  * Luego se hace Stretch sobre el grupo entero (igual que newShape.Stretch en Corel).
+ *
+ * IMPORTANTE (regla de oro del escalado proporcional): los +3.33 / +6.67 mm son
+ * del MOLDE COMPLETO (el grupo entero que se selecciona en Corel). Si lo que se
+ * escaneó es una sola pieza (p. ej. el talón, 30 × 110 mm), NO se le pueden
+ * sumar esos milímetros a la pieza: crecería un 11 % por talla. Los factores se
+ * calculan sobre una REFERENCIA (`refBox`: la hoja escaneada completa o las
+ * medidas del molde completo) y se aplican a la pieza, que así crece en la
+ * misma proporción que el molde entero:
+ *
+ *   factorAncho = (refAncho + incAncho * dif) / refAncho
+ *   factorLargo = (refLargo + incLargo * dif) / refLargo
+ *   piezaNueva  = pieza * factor
  */
 
 export type Mode = 'molde' | 'plantilla';
@@ -42,26 +54,33 @@ export interface ScaleResult {
   offsetXMM: number; // desplazamiento acumulado para colocar al lado
 }
 
+/** Incrementos por talla (mm) según el modo. */
+export function incrementos(mode: Mode): { incAncho: number; incLargo: number } {
+  return mode === 'plantilla'
+    ? { incAncho: INC_PLANTILLA_ANCHO_MM, incLargo: INC_PLANTILLA_LARGO_MM }
+    : { incAncho: INC_MOLDE_ANCHO_MM, incLargo: INC_MOLDE_LARGO_MM };
+}
+
 /**
- * Calcula los factores de escalado EXACTAMENTE como la macro de Corel.
+ * Calcula los factores de escalado EXACTAMENTE como la macro de Corel, sobre
+ * la REFERENCIA (molde completo).
  *
  * @param mode      'molde' o 'plantilla'
- * @param baseBox   BoundingBox del molde base en mm
- * @param tallaBase Talla base detectada
+ * @param refBox    Medidas de referencia en mm (molde completo / hoja escaneada)
+ * @param tallaBase Talla base
  * @param talla     Talla destino
  */
 export function calcularFactores(
   mode: Mode,
-  baseBox: BoundingBoxMM,
+  refBox: BoundingBoxMM,
   tallaBase: number,
   talla: number
 ): { factorAncho: number; factorLargo: number } {
   const diff = talla - tallaBase;
-  const incAncho = mode === 'plantilla' ? INC_PLANTILLA_ANCHO_MM : INC_MOLDE_ANCHO_MM;
-  const incLargo = mode === 'plantilla' ? INC_PLANTILLA_LARGO_MM : INC_MOLDE_LARGO_MM;
+  const { incAncho, incLargo } = incrementos(mode);
 
-  const factorAncho = (baseBox.widthMM + incAncho * diff) / baseBox.widthMM;
-  const factorLargo = (baseBox.heightMM + incLargo * diff) / baseBox.heightMM;
+  const factorAncho = (refBox.widthMM + incAncho * diff) / refBox.widthMM;
+  const factorLargo = (refBox.heightMM + incLargo * diff) / refBox.heightMM;
 
   return { factorAncho, factorLargo };
 }
@@ -79,21 +98,21 @@ export function generarEscalas(
   tallaBase: number,
   tallaMenor: number,
   tallaMayor: number,
-  gapMM: number = 25
+  gapMM: number = 25,
+  /** Referencia para los factores (molde completo). Por defecto, el propio recuadro. */
+  refBox: BoundingBoxMM = baseBox,
 ): ScaleResult[] {
   const results: ScaleResult[] = [];
   let offsetMM = 0;
 
   for (let talla = tallaMenor; talla <= tallaMayor; talla++) {
-    const diff = talla - tallaBase;
-    const { factorAncho, factorLargo } = calcularFactores(mode, baseBox, tallaBase, talla);
-    const incAncho = mode === 'plantilla' ? INC_PLANTILLA_ANCHO_MM : INC_MOLDE_ANCHO_MM;
-    const incLargo = mode === 'plantilla' ? INC_PLANTILLA_LARGO_MM : INC_MOLDE_LARGO_MM;
+    const { factorAncho, factorLargo } = calcularFactores(mode, refBox, tallaBase, talla);
 
     const newWidthMM = baseBox.widthMM * factorAncho;
     const newHeightMM = baseBox.heightMM * factorLargo;
-    const deltaAnchoMM = diff * incAncho;
-    const deltaLargoMM = diff * incLargo;
+    // Crecimiento REAL de lo escaneado (si es una pieza, crece menos que el molde completo)
+    const deltaAnchoMM = newWidthMM - baseBox.widthMM;
+    const deltaLargoMM = newHeightMM - baseBox.heightMM;
 
     results.push({
       size: talla,

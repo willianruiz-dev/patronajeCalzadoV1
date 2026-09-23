@@ -9,7 +9,7 @@ import {
   detectarNumerosEscritos,
   loadImageFromFile,
 } from './modules/ImageLoader';
-import { BoundingBoxMM, Mode, ScaleResult, generarEscalas } from './modules/CorelStyleScaler';
+import { BoundingBoxMM, Mode, ScaleResult, generarEscalas, incrementos } from './modules/CorelStyleScaler';
 import { DPI, PAPERS, PaperSize } from './modules/ScannerConfig';
 import {
   DEFAULT_PRINT_SETTINGS,
@@ -34,6 +34,14 @@ import {
 } from './modules/PdfExporter';
 
 type Tool = 'crop' | 'number' | null;
+
+/**
+ * Sobre qué medidas se aplican los +3.33 / +6.67 mm por talla:
+ *  - 'hoja':     la hoja escaneada completa (el molde completo ocupa la hoja).
+ *  - 'manual':   medidas del molde completo que indica el usuario.
+ *  - 'recuadro': el recuadro detectado (sólo si lo escaneado ES el molde completo).
+ */
+type RefMode = 'hoja' | 'manual' | 'recuadro';
 
 /** Número escrito a mano marcado sobre la imagen de trabajo (px) + orientación del texto. */
 interface NumMark extends PxRect {
@@ -79,6 +87,8 @@ const App: React.FC = () => {
 
   // --- Tallas ---
   const [tallaBaseTxt, setTallaBaseTxt] = useState('36');
+  const [refMode, setRefMode] = useState<RefMode>('hoja');
+  const [refManual, setRefManual] = useState<{ widthMM: string; heightMM: string }>({ widthMM: '216', heightMM: '280' });
   const [tallaMenor, setTallaMenor] = useState(34);
   const [tallaMayor, setTallaMayor] = useState(40);
   const [generated, setGenerated] = useState(false);
@@ -205,6 +215,25 @@ const App: React.FC = () => {
     ? { widthMM: cropRect.w * mmPerPxWork, heightMM: cropRect.h * mmPerPxWork }
     : null;
 
+  // Hoja escaneada completa en mm (ya rotada si aplica)
+  const sheetBox: BoundingBoxMM | null = work
+    ? { widthMM: work.canvas.width * mmPerPxWork, heightMM: work.canvas.height * mmPerPxWork }
+    : null;
+
+  // Referencia sobre la que se aplican los mm por talla (molde completo)
+  const refBox: BoundingBoxMM | null = useMemo(() => {
+    if (refMode === 'recuadro') return baseBox;
+    if (refMode === 'manual') {
+      const w = parseFloat(refManual.widthMM), h = parseFloat(refManual.heightMM);
+      return w > 10 && h > 10 ? { widthMM: w, heightMM: h } : null;
+    }
+    return sheetBox;
+  }, [refMode, refManual, baseBox?.widthMM, baseBox?.heightMM, sheetBox?.widthMM, sheetBox?.heightMM]);
+
+  const refLabel = refBox
+    ? `${refMode === 'hoja' ? 'hoja completa' : refMode === 'manual' ? 'molde completo (manual)' : 'recuadro detectado'} ${refBox.widthMM.toFixed(1)} × ${refBox.heightMM.toFixed(1)} mm`
+    : '';
+
   // Regiones de los números escritos a mano, en mm relativos al recuadro del molde
   const handwrittenRegionsMM: NumberRegion[] = useMemo(() => {
     if (!cropRect || !work) return [];
@@ -227,9 +256,14 @@ const App: React.FC = () => {
 
   // Escalas (factores) y paginación: siempre derivadas de los datos actuales
   const escalas: ScaleResult[] = useMemo(() => {
-    if (!baseBox || !rangoValido) return [];
-    return generarEscalas(mode, baseBox, tallaBase, tallaMenor, tallaMayor, 25);
-  }, [baseBox?.widthMM, baseBox?.heightMM, mode, tallaBase, tallaMenor, tallaMayor, rangoValido]);
+    if (!baseBox || !refBox || !rangoValido) return [];
+    return generarEscalas(mode, baseBox, tallaBase, tallaMenor, tallaMayor, 25, refBox);
+  }, [baseBox?.widthMM, baseBox?.heightMM, refBox, mode, tallaBase, tallaMenor, tallaMayor, rangoValido]);
+
+  // Crecimiento por talla de lo escaneado con la referencia elegida (para mostrarlo)
+  const growthPerSize = baseBox && refBox
+    ? { ancho: baseBox.widthMM * incrementos(mode).incAncho / refBox.widthMM, largo: baseBox.heightMM * incrementos(mode).incLargo / refBox.heightMM }
+    : null;
 
   const layouts: SizeLayout[] = useMemo(
     () => escalas.map(e => layoutSize(e.size, e.newWidthMM, e.newHeightMM, print)),
@@ -249,7 +283,14 @@ const App: React.FC = () => {
   // Log derivado (mismo formato que la macro) + paginación
   const derivedLog = useMemo(() => {
     if (!baseBox || escalas.length === 0) return [];
-    const lines: string[] = ['', `Modo: ${mode.toUpperCase()}`, `Talla base: ${tallaBase}`, `Rango: ${tallaMenor} → ${tallaMayor}`, ''];
+    const inc = incrementos(mode);
+    const lines: string[] = ['', `Modo: ${mode.toUpperCase()}`, `Talla base: ${tallaBase}`, `Rango: ${tallaMenor} → ${tallaMayor}`];
+    if (refBox) {
+      lines.push(`Referencia del crecimiento (molde completo): ${refLabel}`);
+      lines.push(`   factorAncho = (${refBox.widthMM.toFixed(2)} + ${inc.incAncho} × dif) / ${refBox.widthMM.toFixed(2)}   factorLargo = (${refBox.heightMM.toFixed(2)} + ${inc.incLargo} × dif) / ${refBox.heightMM.toFixed(2)}`);
+      if (growthPerSize) lines.push(`   Lo escaneado (${baseBox.widthMM.toFixed(2)} × ${baseBox.heightMM.toFixed(2)} mm) crece ${growthPerSize.ancho.toFixed(2)} mm de ancho y ${growthPerSize.largo.toFixed(2)} mm de largo por talla`);
+    }
+    lines.push('');
     for (const r of escalas) {
       lines.push(`--- Talla ${r.size} (dif=${r.size - tallaBase}) ---`);
       lines.push(`   factorAncho=${r.factorAncho.toFixed(6)}  factorLargo=${r.factorLargo.toFixed(6)}`);
@@ -268,12 +309,13 @@ const App: React.FC = () => {
     for (const l of layouts) lines.push(`Talla ${l.size}: ${l.moldeW.toFixed(1)}×${l.moldeH.toFixed(1)} mm → ${describeLayout(l)}`);
     lines.push(`TOTAL: ${nPages} hoja(s) en ${escalas.length} talla(s)`);
     return lines;
-  }, [baseBox, escalas, layouts, mode, tallaBase, tallaMenor, tallaMayor, numberingFull, handwrittenRegionsMM, hasRegions, numbering, print, nPages]);
+  }, [baseBox, refBox, refLabel, growthPerSize, escalas, layouts, mode, tallaBase, tallaMenor, tallaMayor, numberingFull, handwrittenRegionsMM, hasRegions, numbering, print, nPages]);
 
   const fullLog = [...eventLog, ...(generated ? derivedLog : [])];
 
   const generar = () => {
     if (!baseBox) { setError('Primero carga una imagen y detecta el recuadro del molde.'); return; }
+    if (!refBox) { setError('Ingresa medidas válidas del molde completo (ancho y largo en mm).'); return; }
     if (!Number.isFinite(tallaBase) || tallaBase <= 0) { setError('Ingresa una talla base válida.'); return; }
     if (tallaMenor > tallaMayor) { setError('La talla menor no puede ser mayor que la talla mayor.'); return; }
     if (tallaMayor - tallaMenor > 30) { setError('El rango de tallas es demasiado grande.'); return; }
@@ -307,6 +349,7 @@ const App: React.FC = () => {
       numbering: numberingFull,
       marginMM: print.marginMM,
       title: fileName,
+      referenceLabel: refLabel,
     };
   };
 
@@ -540,6 +583,40 @@ const App: React.FC = () => {
                     <div className="stat-item"><div className="stat-label">Alto/Largo (mm)</div><div className="stat-value">{baseBox.heightMM.toFixed(2)}</div></div>
                     <div className="stat-item"><div className="stat-label">DPI</div><div className="stat-value">{dpi}</div></div>
                   </div>
+                </div>
+              )}
+
+              <h4 style={{ margin: '8px 0' }}>📏 Referencia del crecimiento (+{incrementos(mode).incAncho} mm ancho / +{incrementos(mode).incLargo} mm largo por talla)</h4>
+              <div className="grid-3">
+                <div className="form-group" style={{ gridColumn: refMode === 'manual' ? 'auto' : '1 / -1' }}>
+                  <label>Esos milímetros son del molde completo; se aplican a…</label>
+                  <select value={refMode} onChange={e => setRefMode(e.target.value as RefMode)}>
+                    <option value="hoja">La hoja escaneada completa{sheetBox ? ` (${sheetBox.widthMM.toFixed(1)} × ${sheetBox.heightMM.toFixed(1)} mm)` : ''}</option>
+                    <option value="manual">Medidas del molde completo que yo indico</option>
+                    <option value="recuadro">El recuadro detectado (sólo si lo escaneado es el molde completo)</option>
+                  </select>
+                </div>
+                {refMode === 'manual' && (
+                  <>
+                    <div className="form-group">
+                      <label>Ancho total del molde base (mm)</label>
+                      <input type="number" min={20} max={1000} value={refManual.widthMM} onChange={e => setRefManual(r => ({ ...r, widthMM: e.target.value }))} />
+                    </div>
+                    <div className="form-group">
+                      <label>Largo total del molde base (mm)</label>
+                      <input type="number" min={20} max={1000} value={refManual.heightMM} onChange={e => setRefManual(r => ({ ...r, heightMM: e.target.value }))} />
+                    </div>
+                  </>
+                )}
+              </div>
+              {baseBox && refBox && growthPerSize && (
+                <div className="hint">
+                  Lo escaneado mide <b>{baseBox.widthMM.toFixed(1)} × {baseBox.heightMM.toFixed(1)} mm</b> y crecerá
+                  <b> {growthPerSize.ancho.toFixed(2)} mm de ancho</b> y <b>{growthPerSize.largo.toFixed(2)} mm de largo por talla</b>
+                  {' '}({(100 * incrementos(mode).incAncho / refBox.widthMM).toFixed(2)} % / {(100 * incrementos(mode).incLargo / refBox.heightMM).toFixed(2)} %), igual que crecería dentro del molde completo.
+                  {refMode === 'recuadro' && baseBox.heightMM < 200 && (
+                    <div style={{ color: '#b45309', marginTop: 6 }}>⚠️ El recuadro es pequeño ({baseBox.heightMM.toFixed(0)} mm de largo): si es una pieza suelta (talón, puntera…), NO uses esta opción; usa la hoja completa o las medidas del molde completo.</div>
+                  )}
                 </div>
               )}
 

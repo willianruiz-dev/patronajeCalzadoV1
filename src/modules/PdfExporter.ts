@@ -73,6 +73,8 @@ export interface ExportJob {
   marginMM: number;
   /** Nombre del modelo/archivo para el pie de página (opcional). */
   title?: string;
+  /** Descripción de la referencia usada para los factores (p. ej. "hoja completa 216 × 280 mm"). */
+  referenceLabel?: string;
 }
 
 const IMAGE_ALIAS = 'molde-base';
@@ -211,7 +213,7 @@ function drawHeader(doc: jsPDF, job: ExportJob, layout: SizeLayout, tile: Tile, 
   doc.setFontSize(fontSizePtForCapHeight(1.9));
   doc.setTextColor(70, 70, 70);
   const dif = escala.size - job.tallaBase;
-  const line2 = `${modeLabel(job.mode)} · base ${job.tallaBase} · dif ${dif >= 0 ? '+' : ''}${dif}`;
+  const line2 = `${modeLabel(job.mode)} · base ${job.tallaBase} · dif ${dif >= 0 ? '+' : ''}${dif}${job.referenceLabel ? ` · ref. ${job.referenceLabel}` : ''}`;
   doc.text(line2, pageW - m, m + 8.6, { align: 'right' });
   const paperTxt = layout.paper === 'plotter'
     ? `hoja a medida ${layout.pageW.toFixed(0)} × ${layout.pageH.toFixed(0)} mm`
