@@ -1,10 +1,11 @@
 # 👞 Escalado de Calzado (estilo CorelDRAW) — versión web
 
 SPA 100 % estática (sin backend) que replica la macro de CorelDRAW `EscalarCalzado`:
-se carga el escaneo del molde, se detecta el recuadro del molde (el "grupo" que
-seleccionarías en Corel), se generan las tallas con `Stretch(factorAncho, factorLargo)`
-sobre el molde completo y **cada talla sale enumerada y en su propia hoja lista para
-imprimir**.
+se carga el escaneo, se reconoce la **hoja del escáner** (Carta, Tabloide…) como
+regla de la escala (igual que al seleccionar todo el bitmap en Corel), se recortan
+las piezas a imprimir y se generan las tallas con `Stretch(factorAncho, factorLargo)`
+**sólo sobre las piezas** (el papel de la impresora no crece). Cada talla sale
+enumerada y en su propia hoja lista para imprimir.
 
 ## Qué hace
 
@@ -14,11 +15,12 @@ imprimir**.
 2. **Escalado (igual que la macro)**:
    - Molde: `+3.33 mm` de ancho y `+6.67 mm` de largo por talla.
    - Plantilla: `+4.18 mm` de ancho y `+8.34 mm` de largo por talla.
-   - `factorAncho = (refAncho + incAncho × dif) / refAncho`, `factorLargo = (refLargo + incLargo × dif) / refLargo`,
-     donde la **referencia** son las medidas del molde completo: por defecto la hoja escaneada
-     completa (o medidas manuales del molde completo). Los factores se aplican a lo escaneado
-     (Stretch), así una pieza suelta (talón, puntera…) crece en la misma proporción que el
-     molde entero y nunca se le suman los mm directamente.
+   - `factorAncho = (hojaAncho + incAncho × dif) / hojaAncho`, `factorLargo = (hojaLargo + incLargo × dif) / hojaLargo`.
+     La **regla** es el tamaño de la **hoja del escáner** (Carta, Tabloide, Oficio, A4, A3 u otro),
+     igual que al seleccionar todo el bitmap en Corel. **El papel no crece**: el factor se aplica
+     sólo a las piezas (el recuadro de impresión). Un talón o medio zapato no recibe +3.33/+6.67 mm
+     enteros; crece su parte (p. ej. ~0.6 × 2.8 mm por talla en Carta). El recuadro de las piezas
+     no cambia la escala.
    - El log es el mismo de la macro (ANTES / DESPUES / Δ mm por talla).
 3. **Enumeración automática**:
    - Cada hoja lleva en grande `TALLA 38`, `Hoja 2 de 4 (fila 1 / columna 2)`, un

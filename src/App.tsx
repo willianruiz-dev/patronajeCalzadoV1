@@ -10,7 +10,16 @@ import {
   loadImageFromFile,
 } from './modules/ImageLoader';
 import { BoundingBoxMM, Mode, ScaleResult, generarEscalas, incrementos } from './modules/CorelStyleScaler';
-import { DPI, PAPERS, PaperSize } from './modules/ScannerConfig';
+import {
+  DPI,
+  PAPERS,
+  PaperSize,
+  SCAN_PAPER_IDS,
+  ScanSheetChoice,
+  detectScanPaper,
+  paperOrientedToImage,
+  pixelsToSheetMM,
+} from './modules/ScannerConfig';
 import {
   DEFAULT_PRINT_SETTINGS,
   Orientation,
@@ -34,14 +43,6 @@ import {
 } from './modules/PdfExporter';
 
 type Tool = 'crop' | 'number' | null;
-
-/**
- * Sobre qué medidas se aplican los +3.33 / +6.67 mm por talla:
- *  - 'hoja':     la hoja escaneada completa (el molde completo ocupa la hoja).
- *  - 'manual':   medidas del molde completo que indica el usuario.
- *  - 'recuadro': el recuadro detectado (sólo si lo escaneado ES el molde completo).
- */
-type RefMode = 'hoja' | 'manual' | 'recuadro';
 
 /** Número escrito a mano marcado sobre la imagen de trabajo (px) + orientación del texto. */
 interface NumMark extends PxRect {
@@ -87,8 +88,8 @@ const App: React.FC = () => {
 
   // --- Tallas ---
   const [tallaBaseTxt, setTallaBaseTxt] = useState('36');
-  const [refMode, setRefMode] = useState<RefMode>('hoja');
-  const [refManual, setRefManual] = useState<{ widthMM: string; heightMM: string }>({ widthMM: '216', heightMM: '280' });
+  const [scanSheet, setScanSheet] = useState<ScanSheetChoice>('auto');
+  const [scanManual, setScanManual] = useState<{ widthMM: string; heightMM: string }>({ widthMM: '216', heightMM: '280' });
   const [tallaMenor, setTallaMenor] = useState(34);
   const [tallaMayor, setTallaMayor] = useState(40);
   const [generated, setGenerated] = useState(false);
@@ -110,7 +111,26 @@ const App: React.FC = () => {
 
   // Canvas de trabajo (imagen rotada y reducida)
   const work = useMemo(() => (image ? createWorkCanvas(image, rotated) : null), [image, rotated]);
-  const mmPerPxWork = work ? (25.4 / dpi) / work.scale : 0;
+  const origW = image ? (rotated ? image.naturalHeight : image.naturalWidth) : 0;
+  const origH = image ? (rotated ? image.naturalWidth : image.naturalHeight) : 0;
+  const measuredSheet = origW && origH ? pixelsToSheetMM(origW, origH, dpi) : null;
+  const detectedPaper = origW && origH ? detectScanPaper(origW, origH, dpi) : null;
+
+  // Hoja del escáner = regla de la escala (el papel NO crece; sólo las piezas).
+  const sheetBox: BoundingBoxMM | null = useMemo(() => {
+    if (!origW || !origH) return null;
+    if (scanSheet === 'otro') {
+      const w = parseFloat(scanManual.widthMM), h = parseFloat(scanManual.heightMM);
+      return w > 10 && h > 10 ? { widthMM: w, heightMM: h } : null;
+    }
+    if (scanSheet !== 'auto') return paperOrientedToImage(PAPERS[scanSheet], origW, origH);
+    return measuredSheet;
+  }, [origW, origH, scanSheet, scanManual.widthMM, scanManual.heightMM, measuredSheet?.widthMM, measuredSheet?.heightMM]);
+
+  // mm por píxel de trabajo: si eligió un papel, se calibra a ese papel (corrige DPI mal puesto).
+  const mmPerPxX = work && sheetBox ? sheetBox.widthMM / work.canvas.width : 0;
+  const mmPerPxY = work && sheetBox ? sheetBox.heightMM / work.canvas.height : 0;
+  const mmPerPxWork = mmPerPxX; // compat. para marcas (aprox. uniforme)
 
   // Carga de archivo
   const handleFile = async (file: File) => {
@@ -164,9 +184,12 @@ const App: React.FC = () => {
     const trimmedTxt = Object.values(det.trimmed).some(v => v > 0)
       ? ` (bordes oscuros del escáner descartados: izq ${det.trimmed.left}px, arr ${det.trimmed.top}px, der ${det.trimmed.right}px, aba ${det.trimmed.bottom}px)`
       : '';
-    logEvent(`BoundingBox detectado (px): x=${ox}, y=${oy}, w=${ow}, h=${oh} · umbral=${det.threshold}${trimmedTxt}`);
+    const sw = work.canvas.width / work.scale, sh = work.canvas.height / work.scale;
+    const detP = detectScanPaper(sw, sh, dpi);
+    logEvent(`Hoja del escáner: ${(sw * 25.4 / dpi).toFixed(2)} × ${(sh * 25.4 / dpi).toFixed(2)} mm${detP ? ` ≈ ${detP.name}` : ''} (regla de la escala; el papel NO crece)`);
+    logEvent(`Área de impresión / piezas (px): x=${ox}, y=${oy}, w=${ow}, h=${oh} · umbral=${det.threshold}${trimmedTxt}`);
     logEvent(`mmPorPixel (dpi=${dpi}): ${(25.4 / dpi).toFixed(5)}`);
-    logEvent(`BoundingBox en mm: ancho=${(ow * 25.4 / dpi).toFixed(2)}mm, alto=${(oh * 25.4 / dpi).toFixed(2)}mm`);
+    logEvent(`Piezas en mm: ancho=${(ow * 25.4 / dpi).toFixed(2)}mm, alto=${(oh * 25.4 / dpi).toFixed(2)}mm`);
 
     // Números de talla escritos en el molde: se detectan solos para re-enumerarlos
     const mmPerPxW = (25.4 / dpi) / work.scale;
@@ -212,26 +235,20 @@ const App: React.FC = () => {
   }, [work, cropRect]);
 
   const baseBox: BoundingBoxMM | null = cropRect && work
-    ? { widthMM: cropRect.w * mmPerPxWork, heightMM: cropRect.h * mmPerPxWork }
+    ? { widthMM: cropRect.w * mmPerPxX, heightMM: cropRect.h * mmPerPxY }
     : null;
 
-  // Hoja escaneada completa en mm (ya rotada si aplica)
-  const sheetBox: BoundingBoxMM | null = work
-    ? { widthMM: work.canvas.width * mmPerPxWork, heightMM: work.canvas.height * mmPerPxWork }
-    : null;
+  // Referencia = siempre la hoja del escáner (nunca el recorte de las piezas).
+  const refBox = sheetBox;
 
-  // Referencia sobre la que se aplican los mm por talla (molde completo)
-  const refBox: BoundingBoxMM | null = useMemo(() => {
-    if (refMode === 'recuadro') return baseBox;
-    if (refMode === 'manual') {
-      const w = parseFloat(refManual.widthMM), h = parseFloat(refManual.heightMM);
-      return w > 10 && h > 10 ? { widthMM: w, heightMM: h } : null;
-    }
-    return sheetBox;
-  }, [refMode, refManual, baseBox?.widthMM, baseBox?.heightMM, sheetBox?.widthMM, sheetBox?.heightMM]);
+  const sheetPaperName = scanSheet === 'otro'
+    ? 'otro'
+    : scanSheet !== 'auto'
+      ? PAPERS[scanSheet].name.split(' (')[0]
+      : (detectedPaper?.name ?? 'medida del escaneo');
 
   const refLabel = refBox
-    ? `${refMode === 'hoja' ? 'hoja completa' : refMode === 'manual' ? 'molde completo (manual)' : 'recuadro detectado'} ${refBox.widthMM.toFixed(1)} × ${refBox.heightMM.toFixed(1)} mm`
+    ? `hoja escaneada ${sheetPaperName} ${refBox.widthMM.toFixed(1)} × ${refBox.heightMM.toFixed(1)} mm`
     : '';
 
   // Regiones de los números escritos a mano, en mm relativos al recuadro del molde
@@ -243,10 +260,10 @@ const App: React.FC = () => {
       const x1 = Math.min(m.x + m.w, cropRect.x + cropRect.w);
       const y1 = Math.min(m.y + m.h, cropRect.y + cropRect.h);
       if (x1 - x0 < 2 || y1 - y0 < 2) continue;
-      out.push({ x: (x0 - cropRect.x) * mmPerPxWork, y: (y0 - cropRect.y) * mmPerPxWork, w: (x1 - x0) * mmPerPxWork, h: (y1 - y0) * mmPerPxWork, angle: m.angle });
+      out.push({ x: (x0 - cropRect.x) * mmPerPxX, y: (y0 - cropRect.y) * mmPerPxY, w: (x1 - x0) * mmPerPxX, h: (y1 - y0) * mmPerPxY, angle: m.angle });
     }
     return out;
-  }, [numMarks, cropRect, work, mmPerPxWork]);
+  }, [numMarks, cropRect, work, mmPerPxX, mmPerPxY]);
   const hasRegions = handwrittenRegionsMM.length > 0;
 
   const numberingFull: NumberingSettings = useMemo(() => ({ ...numbering, handwrittenRegionsMM }), [numbering, handwrittenRegionsMM]);
@@ -260,7 +277,7 @@ const App: React.FC = () => {
     return generarEscalas(mode, baseBox, tallaBase, tallaMenor, tallaMayor, 25, refBox);
   }, [baseBox?.widthMM, baseBox?.heightMM, refBox, mode, tallaBase, tallaMenor, tallaMayor, rangoValido]);
 
-  // Crecimiento por talla de lo escaneado con la referencia elegida (para mostrarlo)
+  // Crecimiento REAL de las piezas (no de la hoja: el papel no aumenta de tamaño)
   const growthPerSize = baseBox && refBox
     ? { ancho: baseBox.widthMM * incrementos(mode).incAncho / refBox.widthMM, largo: baseBox.heightMM * incrementos(mode).incLargo / refBox.heightMM }
     : null;
@@ -286,9 +303,9 @@ const App: React.FC = () => {
     const inc = incrementos(mode);
     const lines: string[] = ['', `Modo: ${mode.toUpperCase()}`, `Talla base: ${tallaBase}`, `Rango: ${tallaMenor} → ${tallaMayor}`];
     if (refBox) {
-      lines.push(`Referencia del crecimiento (molde completo): ${refLabel}`);
+      lines.push(`Hoja escaneada (regla de la escala; el papel NO crece): ${refLabel}`);
       lines.push(`   factorAncho = (${refBox.widthMM.toFixed(2)} + ${inc.incAncho} × dif) / ${refBox.widthMM.toFixed(2)}   factorLargo = (${refBox.heightMM.toFixed(2)} + ${inc.incLargo} × dif) / ${refBox.heightMM.toFixed(2)}`);
-      if (growthPerSize) lines.push(`   Lo escaneado (${baseBox.widthMM.toFixed(2)} × ${baseBox.heightMM.toFixed(2)} mm) crece ${growthPerSize.ancho.toFixed(2)} mm de ancho y ${growthPerSize.largo.toFixed(2)} mm de largo por talla`);
+      if (growthPerSize) lines.push(`   Las piezas (${baseBox.widthMM.toFixed(2)} × ${baseBox.heightMM.toFixed(2)} mm) crecen ${growthPerSize.ancho.toFixed(2)} mm de ancho y ${growthPerSize.largo.toFixed(2)} mm de largo por talla`);
     }
     lines.push('');
     for (const r of escalas) {
@@ -315,7 +332,7 @@ const App: React.FC = () => {
 
   const generar = () => {
     if (!baseBox) { setError('Primero carga una imagen y detecta el recuadro del molde.'); return; }
-    if (!refBox) { setError('Ingresa medidas válidas del molde completo (ancho y largo en mm).'); return; }
+    if (!refBox) { setError('Indica el tamaño de la hoja del escáner (Carta, Tabloide, etc.).'); return; }
     if (!Number.isFinite(tallaBase) || tallaBase <= 0) { setError('Ingresa una talla base válida.'); return; }
     if (tallaMenor > tallaMayor) { setError('La talla menor no puede ser mayor que la talla mayor.'); return; }
     if (tallaMayor - tallaMenor > 30) { setError('El rango de tallas es demasiado grande.'); return; }
@@ -395,10 +412,12 @@ const App: React.FC = () => {
       w: Math.round(cropRect.w / work.scale), h: Math.round(cropRect.h / work.scale),
     };
     const crop = createCropCanvas(image, rotated, orig, 3600, whiten);
-    const pxPerMM = dpi / 25.4;
+    const pxPerMMX = sheetBox && origW ? origW / sheetBox.widthMM : dpi / 25.4;
+    const pxPerMMY = sheetBox && origH ? origH / sheetBox.heightMM : dpi / 25.4;
+    const pxPerMM = (pxPerMMX + pxPerMMY) / 2;
     const c = document.createElement('canvas');
-    c.width = Math.round(e.newWidthMM * pxPerMM);
-    c.height = Math.round(e.newHeightMM * pxPerMM);
+    c.width = Math.round(e.newWidthMM * pxPerMMX);
+    c.height = Math.round(e.newHeightMM * pxPerMMY);
     const ctx = c.getContext('2d')!;
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, c.width, c.height);
@@ -454,7 +473,7 @@ const App: React.FC = () => {
 
   // Overlays del selector
   const overlays: OverlayRect[] = [];
-  if (cropRect) overlays.push({ rect: cropRect, color: '#2563eb', label: baseBox ? `Molde ${baseBox.widthMM.toFixed(1)} × ${baseBox.heightMM.toFixed(1)} mm` : 'Molde' });
+  if (cropRect) overlays.push({ rect: cropRect, color: '#2563eb', label: baseBox ? `Piezas ${baseBox.widthMM.toFixed(1)} × ${baseBox.heightMM.toFixed(1)} mm` : 'Piezas' });
   numMarks.forEach((m, i) => overlays.push({ rect: m, color: '#dc2626', label: `Nº ${i + 1}` }));
 
   const onSelectRect = (r: PxRect) => {
@@ -480,8 +499,7 @@ const App: React.FC = () => {
     <div className="app-container">
       <h1>👞 Escalado de Calzado (estilo CorelDRAW)</h1>
       <p className="subtitle">
-        Réplica web de la macro: Stretch(factorAncho, factorLargo) sobre el molde completo ·
-        <strong> cada talla enumerada y en su propia hoja lista para imprimir</strong>
+        Réplica web de la macro: el factor se calcula con la hoja del escáner (como al seleccionar todo el bitmap en Corel) y <strong>sólo se estiran las piezas</strong> · cada talla enumerada en su propia hoja
       </p>
 
       {error && <div className="error-box">{error}</div>}
@@ -521,7 +539,7 @@ const App: React.FC = () => {
           <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }}
             onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ''; }} />
           <p style={{ fontSize: 18, marginBottom: 8 }}>📁 Arrastra el escaneo del molde o haz clic</p>
-          <p style={{ color: '#6b7280', fontSize: 14 }}>JPG/PNG · Escanea el MOLDE COMPLETO (como lo seleccionas en Corel){image ? ` · cargado: ${fileName} (${image.naturalWidth}×${image.naturalHeight}px)` : ''}</p>
+          <p style={{ color: '#6b7280', fontSize: 14 }}>JPG/PNG · Escanea en Carta, Tabloide, etc. (el tamaño de esa hoja es la regla de la escala, igual que al seleccionar todo el bitmap en Corel){image ? ` · cargado: ${fileName} (${image.naturalWidth}×${image.naturalHeight}px)` : ''}</p>
         </div>
 
         {!image && (
@@ -542,13 +560,13 @@ const App: React.FC = () => {
       {/* ============ 2. RECUADRO, TALLAS, NUMERACIÓN ============ */}
       {work && cropRect && (
         <div className="screen">
-          <h2>2. Recuadro del molde, talla base y numeración</h2>
+          <h2>2. Piezas, hoja del escáner y tallas</h2>
 
           <div className="two-col">
             <div>
               <div className="tool-row">
                 <button className={`tool-btn ${tool === 'crop' ? 'active' : ''}`} onClick={() => setTool(tool === 'crop' ? null : 'crop')}>
-                  ✏️ Ajustar recuadro del molde
+                  ✏️ Ajustar recuadro de las piezas
                 </button>
                 <button className={`tool-btn red ${tool === 'number' ? 'active' : ''}`} onClick={() => setTool(tool === 'number' ? null : 'number')}>
                   🔢 {tool === 'number' ? 'Listo (terminar de marcar)' : 'Marcar números a mano'}
@@ -559,7 +577,7 @@ const App: React.FC = () => {
               {tool && (
                 <div className="warning-box" style={{ marginTop: 0 }}>
                   {tool === 'crop'
-                    ? 'Arrastra sobre la imagen para dibujar el recuadro que contiene TODO el molde (equivale al grupo seleccionado en Corel). Los factores se calculan sobre este recuadro.'
+                    ? 'Arrastra el recuadro alrededor de las piezas que quieres imprimir. Esto NO cambia la escala: la escala usa el tamaño de la hoja del escáner, no el recorte.'
                     : 'Arrastra un rectángulo alrededor de CADA número de talla escrito en el molde (uno por pieza). Puedes marcar varios seguidos; al terminar pulsa "Listo". En cada copia esos números se borran y se escribe la talla nueva en el mismo sitio.'}
                 </div>
               )}
@@ -575,48 +593,65 @@ const App: React.FC = () => {
             </div>
 
             <div>
-              {baseBox && (
-                <div className="stats-box">
-                  <h4>📐 BoundingBox base (lo que Corel mediría del grupo)</h4>
+              {sheetBox && (
+                <div className="stats-box regla">
+                  <h4>📄 Hoja escaneada (regla de la escala)</h4>
                   <div className="stats-grid">
-                    <div className="stat-item"><div className="stat-label">Ancho (mm)</div><div className="stat-value">{baseBox.widthMM.toFixed(2)}</div></div>
-                    <div className="stat-item"><div className="stat-label">Alto/Largo (mm)</div><div className="stat-value">{baseBox.heightMM.toFixed(2)}</div></div>
+                    <div className="stat-item"><div className="stat-label">Papel</div><div className="stat-value">{sheetPaperName}</div></div>
+                    <div className="stat-item"><div className="stat-label">Ancho × largo</div><div className="stat-value">{sheetBox.widthMM.toFixed(1)} × {sheetBox.heightMM.toFixed(1)} mm</div></div>
                     <div className="stat-item"><div className="stat-label">DPI</div><div className="stat-value">{dpi}</div></div>
                   </div>
+                  <p className="stat-note">El papel <b>no</b> aumenta de tamaño. Aquí se miden los +{incrementos(mode).incAncho} / +{incrementos(mode).incLargo} mm por talla (igual que al seleccionar todo el bitmap en Corel). Lo que se estira son las piezas.</p>
                 </div>
               )}
 
-              <h4 style={{ margin: '8px 0' }}>📏 Referencia del crecimiento (+{incrementos(mode).incAncho} mm ancho / +{incrementos(mode).incLargo} mm largo por talla)</h4>
+              {baseBox && (
+                <div className="stats-box">
+                  <h4>✂️ Área de impresión (piezas)</h4>
+                  <div className="stats-grid">
+                    <div className="stat-item"><div className="stat-label">Ancho (mm)</div><div className="stat-value">{baseBox.widthMM.toFixed(2)}</div></div>
+                    <div className="stat-item"><div className="stat-label">Alto/Largo (mm)</div><div className="stat-value">{baseBox.heightMM.toFixed(2)}</div></div>
+                  </div>
+                  <p className="stat-note">Sólo decide qué se imprime. No se le suman los {incrementos(mode).incAncho}/{incrementos(mode).incLargo} mm (si se le sumaran a una pieza suelta, crecería de más).</p>
+                </div>
+              )}
+
+              <h4 style={{ margin: '8px 0' }}>📄 Hoja del escáner</h4>
               <div className="grid-3">
-                <div className="form-group" style={{ gridColumn: refMode === 'manual' ? 'auto' : '1 / -1' }}>
-                  <label>Esos milímetros son del molde completo; se aplican a…</label>
-                  <select value={refMode} onChange={e => setRefMode(e.target.value as RefMode)}>
-                    <option value="hoja">La hoja escaneada completa{sheetBox ? ` (${sheetBox.widthMM.toFixed(1)} × ${sheetBox.heightMM.toFixed(1)} mm)` : ''}</option>
-                    <option value="manual">Medidas del molde completo que yo indico</option>
-                    <option value="recuadro">El recuadro detectado (sólo si lo escaneado es el molde completo)</option>
+                <div className="form-group" style={{ gridColumn: scanSheet === 'otro' ? 'auto' : '1 / -1' }}>
+                  <label>Tamaño de la hoja con la que escaneaste</label>
+                  <select value={scanSheet} onChange={e => setScanSheet(e.target.value as ScanSheetChoice)}>
+                    <option value="auto">
+                      Automático{measuredSheet
+                        ? ` (${measuredSheet.widthMM.toFixed(1)} × ${measuredSheet.heightMM.toFixed(1)} mm${detectedPaper ? ` ≈ ${detectedPaper.name}` : ''})`
+                        : ''}
+                    </option>
+                    {SCAN_PAPER_IDS.map(id => (
+                      <option key={id} value={id}>{PAPERS[id].name}</option>
+                    ))}
+                    <option value="otro">Otro (indicar mm a mano)</option>
                   </select>
                 </div>
-                {refMode === 'manual' && (
+                {scanSheet === 'otro' && (
                   <>
                     <div className="form-group">
-                      <label>Ancho total del molde base (mm)</label>
-                      <input type="number" min={20} max={1000} value={refManual.widthMM} onChange={e => setRefManual(r => ({ ...r, widthMM: e.target.value }))} />
+                      <label>Ancho de la hoja (mm)</label>
+                      <input type="number" min={20} max={1500} value={scanManual.widthMM} onChange={e => setScanManual(r => ({ ...r, widthMM: e.target.value }))} />
                     </div>
                     <div className="form-group">
-                      <label>Largo total del molde base (mm)</label>
-                      <input type="number" min={20} max={1000} value={refManual.heightMM} onChange={e => setRefManual(r => ({ ...r, heightMM: e.target.value }))} />
+                      <label>Largo de la hoja (mm)</label>
+                      <input type="number" min={20} max={1500} value={scanManual.heightMM} onChange={e => setScanManual(r => ({ ...r, heightMM: e.target.value }))} />
                     </div>
                   </>
                 )}
               </div>
               {baseBox && refBox && growthPerSize && (
                 <div className="hint">
-                  Lo escaneado mide <b>{baseBox.widthMM.toFixed(1)} × {baseBox.heightMM.toFixed(1)} mm</b> y crecerá
+                  Un talón o medio zapato <b>no</b> crece {incrementos(mode).incAncho} × {incrementos(mode).incLargo} mm:
+                  las piezas miden <b>{baseBox.widthMM.toFixed(1)} × {baseBox.heightMM.toFixed(1)} mm</b> y crecen
                   <b> {growthPerSize.ancho.toFixed(2)} mm de ancho</b> y <b>{growthPerSize.largo.toFixed(2)} mm de largo por talla</b>
-                  {' '}({(100 * incrementos(mode).incAncho / refBox.widthMM).toFixed(2)} % / {(100 * incrementos(mode).incLargo / refBox.heightMM).toFixed(2)} %), igual que crecería dentro del molde completo.
-                  {refMode === 'recuadro' && baseBox.heightMM < 200 && (
-                    <div style={{ color: '#b45309', marginTop: 6 }}>⚠️ El recuadro es pequeño ({baseBox.heightMM.toFixed(0)} mm de largo): si es una pieza suelta (talón, puntera…), NO uses esta opción; usa la hoja completa o las medidas del molde completo.</div>
-                  )}
+                  {' '}({(100 * incrementos(mode).incAncho / refBox.widthMM).toFixed(2)} % / {(100 * incrementos(mode).incLargo / refBox.heightMM).toFixed(2)} %),
+                  la misma proporción que el molde completo. La hoja de la impresora sigue siendo la de siempre.
                 </div>
               )}
 
@@ -752,7 +787,7 @@ const App: React.FC = () => {
 
           <table className="table">
             <thead>
-              <tr><th>Talla</th><th>Dif.</th><th>factorAncho</th><th>factorLargo</th><th>Ancho × Alto (mm)</th><th>Δ mm</th><th>Hojas</th><th>Por separado</th></tr>
+              <tr><th>Talla</th><th>Dif.</th><th>factorAncho</th><th>factorLargo</th><th>Piezas (mm)</th><th>Δ piezas mm</th><th>Hojas</th><th>Por separado</th></tr>
             </thead>
             <tbody>
               {escalas.map((e, i) => {

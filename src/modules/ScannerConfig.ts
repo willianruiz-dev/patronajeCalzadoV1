@@ -35,6 +35,58 @@ export const PAPER_DIMENSIONS_MM: Record<'carta' | 'oficio' | 'a4', { width: num
 
 export type DPI = 300 | 600;
 
+/** Papeles que se usan como hoja del ESCÁNER (la regla de la escala). No incluye plotter. */
+export const SCAN_PAPER_IDS = ['carta', 'oficio', 'a4', 'a3', 'tabloide'] as const;
+export type ScanPaperId = typeof SCAN_PAPER_IDS[number];
+export type ScanSheetChoice = 'auto' | ScanPaperId | 'otro';
+
+export interface SheetMM {
+  widthMM: number;
+  heightMM: number;
+}
+
+/** Tamaño de la imagen en mm según el DPI (lo que Corel mediría del bitmap). */
+export function pixelsToSheetMM(widthPx: number, heightPx: number, dpi: number): SheetMM {
+  return { widthMM: widthPx * 25.4 / dpi, heightMM: heightPx * 25.4 / dpi };
+}
+
+/** Gira el papel para que coincida con la orientación de la imagen (px o mm, da igual la unidad). */
+export function paperOrientedToImage(paper: PaperSpec, imgWidth: number, imgHeight: number): SheetMM {
+  const imgLandscape = imgWidth >= imgHeight;
+  const paperLandscape = paper.widthMM >= paper.heightMM;
+  if (imgLandscape === paperLandscape) return { widthMM: paper.widthMM, heightMM: paper.heightMM };
+  return { widthMM: paper.heightMM, heightMM: paper.widthMM };
+}
+
+export interface DetectedScanPaper {
+  id: ScanPaperId;
+  name: string;
+  measured: SheetMM;
+  nominal: SheetMM;
+  errMM: number;
+}
+
+/**
+ * Reconoce el papel del escáner comparando los mm de la imagen (px × 25.4/DPI)
+ * con Carta / Oficio / A4 / A3 / Tabloide, en cualquier orientación (± tolMM).
+ */
+export function detectScanPaper(widthPx: number, heightPx: number, dpi: number, tolMM = 8): DetectedScanPaper | null {
+  const measured = pixelsToSheetMM(widthPx, heightPx, dpi);
+  let best: DetectedScanPaper | null = null;
+  for (const id of SCAN_PAPER_IDS) {
+    const paper = PAPERS[id];
+    const nominal = paperOrientedToImage(paper, measured.widthMM, measured.heightMM);
+    const dw = Math.abs(nominal.widthMM - measured.widthMM);
+    const dh = Math.abs(nominal.heightMM - measured.heightMM);
+    if (dw > tolMM || dh > tolMM) continue;
+    const errMM = dw + dh;
+    if (!best || errMM < best.errMM) {
+      best = { id, name: paper.name.split(' (')[0], measured, nominal, errMM };
+    }
+  }
+  return best;
+}
+
 export interface ScanConfiguration {
   paperSize: PaperSize;
   dpi: DPI;
