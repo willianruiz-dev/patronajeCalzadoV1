@@ -17,10 +17,10 @@ enumerada y en su propia hoja lista para imprimir.
    - Plantilla: `+4.18 mm` de ancho y `+8.34 mm` de largo por talla.
    - `factorAncho = (hojaAncho + incAncho × dif) / hojaAncho`, `factorLargo = (hojaLargo + incLargo × dif) / hojaLargo`.
      La **regla** es el tamaño de la **hoja del escáner** (Carta, Tabloide, Oficio, A4, A3 u otro),
-     igual que al seleccionar todo el bitmap en Corel. **El papel no crece**: el factor se aplica
-     sólo a las piezas (el recuadro de impresión). Un talón o medio zapato no recibe +3.33/+6.67 mm
-     enteros; crece su parte (p. ej. ~0.6 × 2.8 mm por talla en Carta). El recuadro de las piezas
-     no cambia la escala.
+     igual que al seleccionar todo el bitmap en Corel. Las piezas se rayan **sueltas al centro
+     de la hoja** (no llenan la horma). **El papel no crece**: el factor se aplica sólo a las
+     piezas. Un talón no recibe +3.33/+6.67 mm enteros; crece su parte (~0.6 × 2.8 mm/talla en
+     Carta). El recuadro de las piezas no cambia la escala.
    - El log es el mismo de la macro (ANTES / DESPUES / Δ mm por talla).
 3. **Enumeración automática**:
    - Cada hoja lleva en grande `TALLA 38`, `Hoja 2 de 4 (fila 1 / columna 2)`, un

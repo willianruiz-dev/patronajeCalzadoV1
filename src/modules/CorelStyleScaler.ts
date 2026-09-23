@@ -15,20 +15,18 @@
  *
  * Luego se hace Stretch sobre el grupo entero (igual que newShape.Stretch en Corel).
  *
- * IMPORTANTE — la hoja NO crece; sólo crecen las piezas:
- * Los +3.33 / +6.67 mm son del MOLDE COMPLETO. En Corel el “grupo” que se
- * selecciona es el bitmap entero = la hoja del escáner (Carta, Tabloide…).
- * Esa hoja es la REGLA para calcular el factor, no algo que se imprima más
- * grande. Si lo escaneado es una sola pieza (talón, medio zapato…), NO se le
- * suman esos mm a la pieza (crecería ~11 % por talla). El factor se calcula
- * sobre la hoja (`refBox`) y se aplica a las piezas (`baseBox`):
+ * IMPORTANTE — el papel físico NO crece; sólo crecen las piezas.
+ * En Corel el grupo seleccionado es el bitmap de la HOJA (Carta, Tabloide…).
+ * Las piezas van sueltas al CENTRO de esa hoja (no llenan la horma real).
+ * Los +3.33 / +6.67 mm se miden sobre esa hoja (`refBox`), y el mismo factor
+ * se aplica a las piezas (`baseBox`):
  *
  *   factorAncho = (hojaAncho + incAncho * dif) / hojaAncho
  *   factorLargo = (hojaLargo + incLargo * dif) / hojaLargo
  *   piezaNueva  = pieza * factor
  *
  * Un talón de 38 × 116 mm en una Carta de 216 × 280 mm crece ~0.59 × 2.77 mm
- * por talla, no 3.33 × 6.67. El papel de la impresora sigue siendo Carta.
+ * por talla, no 3.33 × 6.67. La hoja de la impresora sigue siendo Carta.
  */
 
 export type Mode = 'molde' | 'plantilla';
