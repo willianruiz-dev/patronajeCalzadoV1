@@ -1,11 +1,10 @@
 # 👞 Escalado de Calzado (estilo CorelDRAW) — versión web
 
 SPA 100 % estática (sin backend) que replica la macro de CorelDRAW `EscalarCalzado`:
-se carga el escaneo, se reconoce la **hoja del escáner** (Carta, Tabloide…) como
-regla de la escala (igual que al seleccionar todo el bitmap en Corel), se recortan
-las piezas a imprimir y se generan las tallas con `Stretch(factorAncho, factorLargo)`
-**sólo sobre las piezas** (el papel de la impresora no crece). Cada talla sale
-enumerada y en su propia hoja lista para imprimir.
+se carga el escaneo, se toma el **grupo de moldes** (el recuadro de las piezas) como
+base de la escala, se generan las tallas con `Stretch(factorAncho, factorLargo)`
+sobre ese grupo y **cada talla sale enumerada en su propia hoja**. El papel de la
+impresora no crece.
 
 ## Qué hace
 
@@ -16,11 +15,9 @@ enumerada y en su propia hoja lista para imprimir.
    - Molde: `+3.33 mm` de ancho y `+6.67 mm` de largo por talla.
    - Plantilla: `+4.18 mm` de ancho y `+8.34 mm` de largo por talla.
    - `factorAncho = (hojaAncho + incAncho × dif) / hojaAncho`, `factorLargo = (hojaLargo + incLargo × dif) / hojaLargo`.
-     La **regla** es el tamaño de la **hoja del escáner** (Carta, Tabloide, Oficio, A4, A3 u otro),
-     igual que al seleccionar todo el bitmap en Corel. Las piezas se rayan **sueltas al centro
-     de la hoja** (no llenan la horma). **El papel no crece**: el factor se aplica sólo a las
-     piezas. Un talón no recibe +3.33/+6.67 mm enteros; crece su parte (~0.6 × 2.8 mm/talla en
-     Carta). El recuadro de las piezas no cambia la escala.
+     La **regla** es el recuadro del **grupo de moldes** (todas las piezas juntas), no la hoja
+     en blanco. **El papel no crece**: se estira ese grupo y se imprime en Carta/Tabloide.
+     Un talón suelto no debe ser la base: hay que escanear el molde completo.
    - El log es el mismo de la macro (ANTES / DESPUES / Δ mm por talla).
 3. **Enumeración automática**:
    - Cada hoja lleva en grande `TALLA 38`, `Hoja 2 de 4 (fila 1 / columna 2)`, un

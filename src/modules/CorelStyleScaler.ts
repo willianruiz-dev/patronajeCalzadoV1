@@ -15,18 +15,15 @@
  *
  * Luego se hace Stretch sobre el grupo entero (igual que newShape.Stretch en Corel).
  *
- * IMPORTANTE — el papel físico NO crece; sólo crecen las piezas.
- * En Corel el grupo seleccionado es el bitmap de la HOJA (Carta, Tabloide…).
- * Las piezas van sueltas al CENTRO de esa hoja (no llenan la horma real).
- * Los +3.33 / +6.67 mm se miden sobre esa hoja (`refBox`), y el mismo factor
- * se aplica a las piezas (`baseBox`):
+ * IMPORTANTE — la base es el GRUPO DE MOLDES (el recuadro de las piezas),
+ * no la hoja en blanco ni una pieza suelta:
  *
- *   factorAncho = (hojaAncho + incAncho * dif) / hojaAncho
- *   factorLargo = (hojaLargo + incLargo * dif) / hojaLargo
- *   piezaNueva  = pieza * factor
+ *   factorAncho = (moldeAncho + incAncho * dif) / moldeAncho
+ *   factorLargo = (moldeLargo + incLargo * dif) / moldeLargo
+ *   piezaNueva  = pieza * factor   (todo el grupo se estira junto)
  *
- * Un talón de 38 × 116 mm en una Carta de 216 × 280 mm crece ~0.59 × 2.77 mm
- * por talla, no 3.33 × 6.67. La hoja de la impresora sigue siendo Carta.
+ * Un molde de 161 × 224 mm crece +3.33 × +6.67 mm por talla. El talón de
+ * adentro crece su parte. El papel de la impresora no cambia de tamaño.
  */
 
 export type Mode = 'molde' | 'plantilla';
