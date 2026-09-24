@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import RectSelector, { OverlayRect } from './components/RectSelector';
 import SizePreview, { drawRegionNumber } from './components/SizePreview';
+import { BoundingBoxMM, Mode, ScaleResult, generarEscalas, incrementos } from './modules/CorelStyleScaler';
 import {
   PxRect,
   createCropCanvas,
@@ -9,16 +10,6 @@ import {
   detectarNumerosEscritos,
   loadImageFromFile,
 } from './modules/ImageLoader';
-import { BoundingBoxMM, Mode, ScaleResult, generarEscalas, incrementos } from './modules/CorelStyleScaler';
-import {
-  DPI,
-  PAPERS,
-  PaperSize,
-  SCAN_PAPER_IDS,
-  ScanSheetChoice,
-  detectScanPaper,
-  pixelsToSheetMM,
-} from './modules/ScannerConfig';
 import {
   DEFAULT_PRINT_SETTINGS,
   Orientation,
@@ -40,6 +31,15 @@ import {
   buildMultiPagePdf,
   dataUrlToBytes,
 } from './modules/PdfExporter';
+import {
+  DPI,
+  PAPERS,
+  PaperSize,
+  SCAN_PAPER_IDS,
+  ScanSheetChoice,
+  detectScanPaper,
+  pixelsToSheetMM,
+} from './modules/ScannerConfig';
 
 type Tool = 'crop' | 'number' | null;
 
@@ -496,7 +496,7 @@ const App: React.FC = () => {
 
   return (
     <div className="app-container">
-      <h1>👞 Escalado de Calzado (estilo CorelDRAW)</h1>
+      <h1>👞 Escalado de Calzado </h1>
       <p className="subtitle">
         La regla es el <strong>tamaño completo de la hoja</strong> (Carta, Tabloide…), no el recuadro del molde.
         Los moldes crecen; el papel de la impresora no.
@@ -734,7 +734,7 @@ const App: React.FC = () => {
               )}
 
               <div className="button-row">
-                <button onClick={generar} disabled={!rangoValido || !baseBox}>📏 Generar tallas (igual que “Generar Tallas” en Corel)</button>
+                <button onClick={generar} disabled={!rangoValido || !baseBox}>📏 Generar tallas </button>
               </div>
             </div>
           </div>
@@ -834,7 +834,6 @@ const App: React.FC = () => {
           )}
 
           <div style={{ marginTop: 20 }}>
-            <h4>Log (igual que el log de la macro):</h4>
             <pre className="log">{fullLog.join('\n')}</pre>
           </div>
         </div>
